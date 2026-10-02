@@ -1,0 +1,14 @@
+{
+  "name": "opencode-always-background",
+  "version": "0.0.1",
+  "description": "OpenCode V2 plugin: actively forces background execution for shell and subagent tool calls via the execute.before hook",
+  "author": "benrap",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benrap/OpencodePlugins.git",
+    "directory": "always-background"
+  },
+  "type": "module",
+  "main": "index.js"
+}

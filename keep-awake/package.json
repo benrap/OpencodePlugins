@@ -1,0 +1,14 @@
+{
+  "name": "opencode-keep-awake",
+  "version": "1.0.0",
+  "description": "OpenCode V2 plugin: keep Windows awake while any session/agent is busy",
+  "author": "benrap",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benrap/OpencodePlugins.git",
+    "directory": "keep-awake"
+  },
+  "type": "module",
+  "main": "index.js"
+}

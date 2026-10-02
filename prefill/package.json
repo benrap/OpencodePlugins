@@ -1,0 +1,14 @@
+{
+  "name": "opencode-prefill",
+  "version": "1.0.0",
+  "description": "OpenCode V2 plugin: per-message opt-in message injection (assistant prefill / conversation steering) triggered by a trailing #prefill marker that is stripped before persistence",
+  "author": "benrap",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benrap/OpencodePlugins.git",
+    "directory": "prefill"
+  },
+  "type": "module",
+  "main": "index.js"
+}
