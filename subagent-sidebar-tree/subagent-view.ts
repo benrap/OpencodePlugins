@@ -365,3 +365,31 @@ export function agentColorIndex(
   const hash = stableHash(agentId)
   return ((hash % paletteLength) + paletteLength) % paletteLength
 }
+
+/**
+ * Resolve the primary (base/default) text color from a theme `text` record.
+ *
+ * Newer theme shapes expose `text.default`; older ones expose `text.base`.
+ * PURE and host-independent so it can be unit tested without the TUI.
+ */
+export function resolveBaseColor(text: unknown): unknown {
+  const t = (text ?? {}) as { base?: unknown; default?: unknown }
+  return t.base ?? t.default
+}
+
+/**
+ * Resolve a genuinely MUTED (grey) text color from a theme `text` record.
+ *
+ * Prefers `text.muted` (newer themes) or `text.subdued` (v2.0.6). Crucially it
+ * NEVER falls back to `text.base`/`text.default` — those are the primary/white
+ * color and were the cause of the `done` label rendering plain white. When the
+ * theme has no muted alias it falls back to the `hue.neutral` scale (400, then
+ * 300) and finally to a hardcoded grey, so the result is always grey.
+ */
+export function resolveMutedColor(text: unknown, hue: unknown): unknown {
+  const t = (text ?? {}) as { muted?: unknown; subdued?: unknown; base?: unknown; default?: unknown }
+  const muted = t.muted ?? t.subdued
+  if (muted) return muted
+  const neutral = (hue ?? {}) as { neutral?: Record<number, unknown> }
+  return neutral.neutral?.[400] ?? neutral.neutral?.[300] ?? "#808080"
+}

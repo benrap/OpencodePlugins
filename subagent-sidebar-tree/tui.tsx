@@ -6,6 +6,8 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "so
 import {
   agentColorIndex,
   descendantSessions,
+  resolveBaseColor,
+  resolveMutedColor,
   shorten,
   subagentStatus,
   subagentTask,
@@ -47,7 +49,7 @@ const STATUS_LABELS: Record<SubagentStatus, string> = {
   idle: "idle",
   done: "done",
   failed: "failed",
-  stopped: "stopped",
+  stopped: "interrupted",
 }
 
 type SyncState = {
@@ -105,9 +107,8 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
   const messages = () => props.context.data.session.message.list(props.session.id)
   const width = () => props.node.prefix.length
 
-  const baseColor = () => props.context.theme.text.base ?? (props.context.theme.text as { default?: unknown }).default
-  const mutedColor = () =>
-    props.context.theme.text.muted ?? props.context.theme.text.base ?? (props.context.theme.text as { default?: unknown }).default
+  const baseColor = () => resolveBaseColor(props.context.theme.text)
+  const mutedColor = () => resolveMutedColor(props.context.theme.text, props.context.theme.hue)
 
   const agentList = () => {
     try {
@@ -184,13 +185,13 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
       }
       if (theme?.hue?.neutral?.[500]) return theme.hue.neutral[500]
     } catch {
-      /* fall back to muted */
+      /* fall back to muted grey */
     }
-    return muted
+    return mutedColor()
   }
 
   const statusColor = (value: SubagentStatus): unknown => {
-    // running -> green, failed/stopped -> red, done/idle -> muted grey
+    // running -> green, failed -> red, stopped -> orange, done/idle -> mute grey
     if (value === "running") {
       try {
         const theme = props.context.theme as unknown as {
@@ -204,7 +205,7 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
       }
       return "#7fd88f"
     }
-    if (value === "failed" || value === "stopped") {
+    if (value === "failed") {
       try {
         const theme = props.context.theme as unknown as {
           text?: { feedback?: { error?: { base?: unknown } } }
@@ -217,16 +218,30 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
       }
       return "#e06c75"
     }
+    if (value === "stopped") {
+      try {
+        const theme = props.context.theme as unknown as {
+          text?: { feedback?: { warning?: { base?: unknown } } }
+          hue?: { orange?: Record<number, unknown> }
+        }
+        const orange = theme.text?.feedback?.warning?.base ?? theme.hue?.orange?.[400]
+        if (orange) return orange
+      } catch {
+        /* fall through to the default orange */
+      }
+      return "#f5a742"
+    }
     return mutedColor()
   }
 
   const rowTone = (value: SubagentStatus): { name: unknown; preview: unknown } => {
-    if (value === "failed" || value === "stopped") {
-      const red = statusColor(value)
+    if (value === "failed") {
+      const red = statusColor("failed")
       return { name: red, preview: red }
     }
-    // running / idle / done all keep the per-agent color for the NAME; only
-    // the status label is greyed for done (see statusColor).
+    // running / idle / done / stopped all keep the per-agent color for the
+    // NAME and the dim activity color for the preview; only the status label
+    // is tinted (green/red/orange/grey) via statusColor.
     return { name: agentColor(), preview: hovered() ? baseColor() : activityColor() }
   }
 

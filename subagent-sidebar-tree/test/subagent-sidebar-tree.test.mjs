@@ -6,6 +6,8 @@ import {
   descendantSessions,
   isActiveSubagent,
   isVisibleSubagent,
+  resolveBaseColor,
+  resolveMutedColor,
   shorten,
   stableHash,
   subagentStatus,
@@ -14,7 +16,7 @@ import {
   treePrefix,
   visibleSubagentIDs,
   visibleSubagents,
-} from "../subagent-view.ts"
+} from "file:///%USERPROFILE%/.config/opencode/plugins/subagent-sidebar-tree/subagent-view.ts"
 
 const s = (id, parentID, outcome, updated) => ({
   id,
@@ -591,6 +593,39 @@ check("visibleSubagents: mixes running + recent terminal, drops idle/old", () =>
   ]
   const kept = visibleSubagents(all, activityMap({ run: "running" }), now)
   assert.deepEqual(kept.map((x) => x.id), ["run", "fresh-done", "fresh-stop"])
+})
+
+// ------------------------------------ (g) base/muted color resolvers (color bug)
+check("resolveBaseColor: prefers base, then default, tolerates junk", () => {
+  assert.equal(resolveBaseColor({ base: "#fff" }), "#fff")
+  assert.equal(resolveBaseColor({ default: "#eee" }), "#eee")
+  assert.equal(resolveBaseColor({ base: "#fff", default: "#eee" }), "#fff")
+  assert.equal(resolveBaseColor(undefined), undefined)
+  assert.equal(resolveBaseColor({}), undefined)
+})
+
+check("resolveMutedColor: muted alias wins", () => {
+  assert.equal(resolveMutedColor({ muted: "#abc" }, {}), "#abc")
+})
+
+check("resolveMutedColor: subdued alias (v2.0.6) wins", () => {
+  assert.equal(resolveMutedColor({ subdued: "#def" }, {}), "#def")
+})
+
+check("resolveMutedColor: NEVER falls back to base/default white", () => {
+  const muted = resolveMutedColor({ base: "#fff", default: "#fff" }, {})
+  assert.notEqual(muted, "#fff")
+  assert.equal(muted, "#808080")
+})
+
+check("resolveMutedColor: uses hue.neutral 400 when text has no muted alias", () => {
+  assert.equal(resolveMutedColor({ base: "#fff" }, { neutral: { 400: "#777" } }), "#777")
+})
+
+check("resolveMutedColor: hue.neutral 300 then hardcoded grey", () => {
+  assert.equal(resolveMutedColor({ base: "#fff" }, { neutral: { 300: "#666" } }), "#666")
+  assert.equal(resolveMutedColor({ base: "#fff" }, {}), "#808080")
+  assert.equal(resolveMutedColor(undefined, undefined), "#808080")
 })
 
 console.log(results.join("\n"))

@@ -3,7 +3,9 @@ import assert from "node:assert/strict"
 // Importing this module must succeed with NO @opentui/*, solid-js, or tui.tsx
 // present in the resolution graph. If server.ts (or its transitive imports)
 // touched any of those, this import would throw ERR_MODULE_NOT_FOUND.
-const mod = await import("../server.ts")
+const mod = await import(
+  "file:///%USERPROFILE%/.config/opencode/plugins/subagent-sidebar-tree/server.ts"
+)
 const plugin = mod.default
 
 assert.equal(typeof plugin, "object", "server default export must be an object")
