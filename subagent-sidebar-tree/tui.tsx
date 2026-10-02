@@ -5,10 +5,13 @@ import type { Context } from "@opencode/plugin/tui/context"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import {
   agentColorIndex,
+  contextUsage,
   descendantSessions,
+  formatContextUsage,
   latestTaskDescription,
   resolveBaseColor,
   resolveMutedColor,
+  ROW_SEPARATOR,
   shorten,
   subagentStatus,
   subagentTask,
@@ -106,6 +109,30 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
   const activity = () => props.context.data.session.status(props.session.id)
   const status = () => subagentStatus(session(), activity())
   const messages = () => props.context.data.session.message.list(props.session.id)
+  const sessionLocation = () => (session() as unknown as { location?: unknown }).location
+  const models = () => {
+    try {
+      const data = props.context.data as unknown as {
+        location?: { model?: { list?: (location: unknown) => unknown } }
+      }
+      const list = data?.location?.model?.list?.(sessionLocation())
+      return Array.isArray(list) ? list : undefined
+    } catch {
+      return undefined
+    }
+  }
+  const contextText = () => {
+    try {
+      const usage = contextUsage(
+        messages(),
+        models(),
+        (session() as unknown as { revert?: { messageID?: string } }).revert?.messageID,
+      )
+      return usage ? formatContextUsage(usage.tokens, usage.percent) : undefined
+    } catch {
+      return undefined
+    }
+  }
   const width = () => props.node.prefix.length
 
   const parentMessages = () => {
@@ -278,8 +305,12 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
       <text fg={baseColor()} wrapMode="none">
         <span style={{ get fg() { return mutedColor() } }}>{props.node.prefix}</span>
         <span style={{ get fg() { return rowTone().name } }}>{shorten(sessionLabel(session()), Math.max(8, 24 - width()))}</span>
-        {" · "}
+        {ROW_SEPARATOR}
         <span style={{ get fg() { return statusColor(status()) } }}>{STATUS_LABELS[status()]}</span>
+        <Show when={contextText()}>
+          {ROW_SEPARATOR}
+          <span style={{ get fg() { return mutedColor() } }}>{contextText()}</span>
+        </Show>
       </text>
       <text fg={rowTone().preview} wrapMode="none">
         <span style={{ get fg() { return mutedColor() } }}>{props.node.contPrefix}</span>

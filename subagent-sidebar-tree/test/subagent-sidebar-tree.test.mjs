@@ -1,14 +1,19 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import {
   RECENT_WINDOW_MS,
   activeSubagents,
   agentColorIndex,
+  contextUsage,
   descendantSessions,
+  formatContextUsage,
+  formatTokenCount,
   isActiveSubagent,
   isVisibleSubagent,
   latestTaskDescription,
   resolveBaseColor,
   resolveMutedColor,
+  ROW_SEPARATOR,
   shorten,
   stableHash,
   subagentStatus,
@@ -312,6 +317,15 @@ check("treePrefix: helper emits unicode box-drawing for own/ancestor flags", () 
   assert.equal(treePrefix([false, true], true), "│     └─ ")
   // default isLast is false
   assert.equal(treePrefix([]), "├─ ")
+
+  // each nesting level contributes exactly 3 characters, plus a 3-char connector
+  assert.equal(treePrefix([], false).length, 3)
+  assert.equal(treePrefix([false], false).length, 6)
+  assert.equal(treePrefix([true], true).length, 6)
+  assert.equal(treePrefix([false, true], true).length, 9)
+  assert.equal(treePrefix([false, false, false, false], false).length, 15)
+  // the 2-char `─` connector is present
+  assert.ok(treePrefix([false, true], true).includes("─"))
 })
 
 // ------------------------------------- (b3) title-line continuation prefix
@@ -323,6 +337,11 @@ check("treeContinuation: exact strings for own/ancestor flags", () => {
   assert.equal(treeContinuation([false], false), "│  │  ")
   assert.equal(treeContinuation([true], false), "   │  ")
   assert.equal(treeContinuation([true], true), "      ")
+
+  // each ancestor level adds exactly 3 characters
+  assert.equal(treeContinuation([], true).length, 3)
+  assert.equal(treeContinuation([false], true).length, 6)
+  assert.equal(treeContinuation([false, false], false).length, 9)
 })
 
 check("tree: contPrefix follows the visible hierarchy (roots + nested)", () => {
@@ -731,6 +750,210 @@ check("latestTaskDescription: accepts alternate tool/metadata/description shapes
     state: { input: { task_id: "ses_child" } },
   }
   assert.equal(latestTaskDescription([{ content: [c] }], "ses_child"), "part title")
+})
+
+// ------------------------------------------------- (i) context usage rendering
+check("formatTokenCount: whole-number K/M (no decimals), rounding nearest", () => {
+  assert.equal(formatTokenCount(0), "0")
+  assert.equal(formatTokenCount(999), "999")
+  assert.equal(formatTokenCount(1000), "1K")
+  assert.equal(formatTokenCount(1500), "2K")
+  assert.equal(formatTokenCount(131000), "131K")
+  assert.equal(formatTokenCount(999500), "1M") // 999.5K rounds up -> carry to M
+  assert.equal(formatTokenCount(999999), "1M") // 1000K normalizes to 1M
+  assert.equal(formatTokenCount(1000000), "1M")
+  assert.equal(formatTokenCount(1234567), "1M")
+  assert.equal(formatTokenCount(1500000), "2M")
+})
+
+check("formatTokenCount: garbage never throws and always returns a string", () => {
+  for (const value of [undefined, NaN, Infinity, -Infinity, null, {}, [], "abc", () => {}]) {
+    let result
+    assert.doesNotThrow(() => {
+      result = formatTokenCount(value)
+    })
+    assert.equal(typeof result, "string")
+  }
+})
+
+check("formatContextUsage: keeps the (NN%) suffix only when known", () => {
+  assert.equal(formatContextUsage(131000, 13), "131K (13%)")
+  assert.equal(formatContextUsage(131000, undefined), "131K")
+  assert.equal(formatContextUsage(500, 0), "500 (0%)")
+  assert.equal(formatContextUsage(undefined, 13), undefined)
+})
+
+const usageAssistant = (tokens, model) => ({ type: "assistant", tokens, model })
+
+check("contextUsage: sums input+output+reasoning+cache.read+cache.write", () => {
+  const messages = [
+    usageAssistant(
+      { input: 100, output: 20, reasoning: 5, cache: { read: 4, write: 2 } },
+      { providerID: "p", id: "m" },
+    ),
+  ]
+  const usage = contextUsage(messages, [{ providerID: "p", id: "m", limit: { context: 131 } }])
+  assert.equal(usage.tokens, 131)
+  assert.equal(usage.percent, 100)
+})
+
+check("contextUsage: picks the LAST assistant with tokens and skips token-less ones", () => {
+  const messages = [
+    usageAssistant({ input: 1, output: 0, reasoning: 0, cache: {} }, { providerID: "p", id: "m" }),
+    { type: "assistant", content: [{ type: "text", text: "no tokens" }] },
+    usageAssistant({ input: 10, output: 0, reasoning: 0, cache: {} }, { providerID: "p", id: "m" }),
+  ]
+  const usage = contextUsage(messages, [{ providerID: "p", id: "m", limit: { context: 100 } }])
+  assert.equal(usage.tokens, 10)
+  assert.equal(usage.percent, 10)
+})
+
+check("contextUsage: completed compaction hides earlier usage; usage after it is used", () => {
+  const early = usageAssistant({ input: 500, output: 0, reasoning: 0, cache: {} }, { providerID: "p", id: "m" })
+  const compaction = { type: "compaction", status: "completed" }
+  const late = usageAssistant({ input: 50, output: 0, reasoning: 0, cache: {} }, { providerID: "p", id: "m" })
+
+  // Only usage BEFORE the compaction: ignored -> undefined.
+  assert.equal(contextUsage([early, compaction], [{ providerID: "p", id: "m", limit: { context: 100 } }]), undefined)
+
+  // Usage AFTER the compaction: used.
+  const after = contextUsage([early, compaction, late], [{ providerID: "p", id: "m", limit: { context: 100 } }])
+  assert.equal(after.tokens, 50)
+  assert.equal(after.percent, 50)
+})
+
+check("contextUsage: a non-completed compaction is NOT a boundary", () => {
+  const early = usageAssistant({ input: 500, output: 0, reasoning: 0, cache: {} }, { providerID: "p", id: "m" })
+  const pending = { type: "compaction", status: "pending" }
+  const usage = contextUsage([early, pending], [{ providerID: "p", id: "m", limit: { context: 1000 } }])
+  assert.equal(usage.tokens, 500)
+  assert.equal(usage.percent, 50)
+})
+
+check("contextUsage: boundaryMessageID only reads messages before the boundary", () => {
+  const first = { id: "u1", type: "user" }
+  const usageEarly = {
+    id: "a1",
+    type: "assistant",
+    tokens: { input: 30, output: 0, reasoning: 0, cache: {} },
+    model: { providerID: "p", id: "m" },
+  }
+  const usageLate = {
+    id: "a2",
+    type: "assistant",
+    tokens: { input: 90, output: 0, reasoning: 0, cache: {} },
+    model: { providerID: "p", id: "m" },
+  }
+  const messages = [first, usageEarly, usageLate]
+  const usage = contextUsage(messages, [{ providerID: "p", id: "m", limit: { context: 100 } }], "a2")
+  assert.equal(usage.tokens, 30)
+  assert.equal(usage.percent, 30)
+
+  // Unknown boundary id -> undefined.
+  assert.equal(
+    contextUsage(messages, [{ providerID: "p", id: "m", limit: { context: 100 } }], "nope"),
+    undefined,
+  )
+})
+
+check("contextUsage: model lookup by providerID+id yields a rounded percent", () => {
+  const messages = [
+    usageAssistant(
+      { input: 131000, output: 0, reasoning: 0, cache: {} },
+      { providerID: "anthropic", id: "claude" },
+    ),
+  ]
+  const usage = contextUsage(messages, [
+    { providerID: "other", id: "claude", limit: { context: 10 } },
+    { providerID: "anthropic", id: "claude", limit: { context: 1000000 } },
+  ])
+  assert.equal(usage.tokens, 131000)
+  assert.equal(usage.percent, 13)
+})
+
+check("contextUsage: missing limit.context / undefined models / unknown model -> percent undefined", () => {
+  const messages = [
+    usageAssistant({ input: 42, output: 0, reasoning: 0, cache: {} }, { providerID: "p", id: "m" }),
+  ]
+  const noLimit = contextUsage(messages, [{ providerID: "p", id: "m" }])
+  assert.equal(noLimit.tokens, 42)
+  assert.equal(noLimit.percent, undefined)
+
+  const noModels = contextUsage(messages, undefined)
+  assert.equal(noModels.tokens, 42)
+  assert.equal(noModels.percent, undefined)
+
+  const notFound = contextUsage(messages, [{ providerID: "x", id: "y", limit: { context: 100 } }])
+  assert.equal(notFound.tokens, 42)
+  assert.equal(notFound.percent, undefined)
+})
+
+check("contextUsage: all-zero tokens -> undefined", () => {
+  const messages = [
+    usageAssistant({ input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, { providerID: "p", id: "m" }),
+  ]
+  assert.equal(contextUsage(messages, [{ providerID: "p", id: "m", limit: { context: 100 } }]), undefined)
+})
+
+check("contextUsage: malformed input never throws", () => {
+  let result
+  assert.doesNotThrow(() => {
+    // null/number/string junk in the message list
+    result = contextUsage([null, 42, "nope", undefined], undefined)
+  })
+  assert.equal(result, undefined)
+
+  assert.doesNotThrow(() => {
+    result = contextUsage([{ type: "assistant", tokens: null }], undefined)
+  })
+  assert.equal(result, undefined)
+
+  assert.doesNotThrow(() => {
+    result = contextUsage([{ type: "assistant", tokens: { input: 5, output: 0 } }], undefined)
+  })
+  assert.equal(result.tokens, 5) // missing cache treated as zero
+  assert.equal(result.percent, undefined) // missing model -> no percent
+
+  assert.doesNotThrow(() => {
+    result = contextUsage(
+      [{ type: "assistant", tokens: { input: 5, output: 0 }, model: null }],
+      "not-an-array",
+    )
+  })
+  assert.equal(result.tokens, 5)
+  assert.equal(result.percent, undefined)
+})
+
+// ------------------------------- (j) spaced row separator (spaces around ·)
+check("ROW_SEPARATOR is a spaced middle dot with surrounding spaces", () => {
+  assert.equal(ROW_SEPARATOR, " · ")
+  assert.equal(ROW_SEPARATOR.includes(" "), true)
+  assert.equal(ROW_SEPARATOR.trim(), "·")
+})
+
+check("composed row title is spaced: general · running · 131K (13%)", () => {
+  const title = ["general", "running", "131K (13%)"].join(ROW_SEPARATOR)
+  assert.equal(title, "general · running · 131K (13%)")
+  assert.equal(title.includes("  "), false, "separator must not produce double spaces")
+  // exactly ONE space on each side of the dot
+  assert.ok(title.includes("general · running"), "TYPE and STATE separated by one spaced dot")
+  assert.ok(title.includes("running · 131K (13%)"), "STATE and CONTEXT separated by one spaced dot")
+})
+
+check("row title omits the context segment cleanly (no dangling dot)", () => {
+  const withoutContext = ["general", "running"].join(ROW_SEPARATOR)
+  assert.equal(withoutContext, "general · running")
+  assert.equal(withoutContext.endsWith(ROW_SEPARATOR), false)
+})
+
+check("tui.tsx renders the shared ROW_SEPARATOR, never a hardcoded spaced literal", () => {
+  const src = readFileSync(new URL("../tui.tsx", import.meta.url), "utf8")
+  // The spaced glyph lives ONLY in subagent-view.ts's shared constant; the JSX
+  // render site must use {ROW_SEPARATOR} so the tests and TUI can never drift.
+  assert.equal(src.includes(" · "), false, "tui.tsx must not hardcode a spaced middle dot literal")
+  assert.equal(src.includes('" · "'), false)
+  const uses = src.match(/\{ROW_SEPARATOR\}/g) ?? []
+  assert.ok(uses.length >= 2, `expected >=2 ROW_SEPARATOR spans, found ${uses.length}`)
 })
 
 console.log(results.join("\n"))

@@ -9,6 +9,13 @@ export type SubagentSession = {
 
 export type SubagentStatus = "running" | "idle" | "done" | "failed" | "stopped"
 
+/**
+ * Separator between the segments of a subagent row's first line. A SPACED
+ * middle dot so the row reads `general · running · 131K (13%)`. A shared
+ * constant so the TUI spans and the tests assert the exact same glyph.
+ */
+export const ROW_SEPARATOR = " · "
+
 export type SubagentTreeNode = {
   session: SubagentSession
   depth: number
@@ -426,7 +433,7 @@ function latestAssistantActivity(messages: readonly unknown[]): string | undefin
         if (state === "running" || state === "streaming") {
           const name = stringValue(part.name) ?? "tool"
           const input = toolInputSummary(part.state.input)
-          return shorten(input ? `${name} · ${input}` : `Using ${name}`)
+          return shorten(input ? `${name}${ROW_SEPARATOR}${input}` : `Using ${name}`)
         }
       }
 
@@ -590,4 +597,118 @@ export function resolveMutedColor(text: unknown, hue: unknown): unknown {
   if (muted) return muted
   const neutral = (hue ?? {}) as { neutral?: Record<number, unknown> }
   return neutral.neutral?.[400] ?? neutral.neutral?.[300] ?? "#808080"
+}
+
+
+// ---------------------------------------------------------------- context usage
+// Ported from OpenCode v2.0.6 TUI `util/locale.ts` (Locale.number) and
+// `util/session.ts` (formatContextUsage/contextUsage), which are not exported to
+// plugins. Pure and defensive so they can be unit-tested without the TUI.
+
+/**
+ * Format a token count as a WHOLE number with a `K`/`M` suffix and no decimal
+ * point: `999`, `1K`, `1500 -> 2K`, `131K`, `1M`.
+ *
+ * The host's `Locale.number` emits one decimal for thousands (`131.0K`), which
+ * the sidebar found too wide, so this intentionally diverges from it. Values
+ * below 1000 stay exact and unsuffixed. From 1000 up we divide by 1000 (or
+ * 1e6 for M) and `Math.round` to the nearest whole number (half rounds up,
+ * e.g. `1500 -> 2K`). If rounding a K value carries it to `1000K`, it is
+ * normalized to `1M` (`999500 -> 1M`) so the suffix never reaches four digits.
+ */
+export function formatTokenCount(value: number): string {
+  const num = typeof value === "number" && Number.isFinite(value) ? value : 0
+  if (num < 1_000) return num.toString()
+  if (num < 1_000_000) {
+    const thousands = Math.round(num / 1_000)
+    if (thousands < 1_000) return `${thousands}K`
+    // Rounding pushed 999500..999999 up to 1000K: carry into millions.
+    return `${Math.round(num / 1_000_000)}M`
+  }
+  return `${Math.round(num / 1_000_000)}M`
+}
+
+/**
+ * `131K (13%)`, or `131K` when the percent is unknown. Returns undefined when
+ * there are no tokens to show.
+ */
+export function formatContextUsage(tokens: number | undefined, percent?: number): string | undefined {
+  if (tokens === undefined || tokens === null) return undefined
+  const value = formatTokenCount(tokens)
+  return percent === undefined ? value : `${value} (${percent}%)`
+}
+
+export type ContextUsage = { tokens: number; percent: number | undefined }
+
+function tokenNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0
+}
+
+/**
+ * Last assistant message carrying token usage, ignoring everything at or before
+ * the most recent COMPLETED compaction, and never reading past
+ * `boundaryMessageID`. Mirrors the host's `lastAssistantWithUsage`.
+ */
+export function lastAssistantWithUsage(
+  messages: readonly unknown[],
+  boundaryMessageID?: string,
+): unknown | undefined {
+  if (!Array.isArray(messages)) return undefined
+  let boundaryIndex = -1
+  if (boundaryMessageID) {
+    boundaryIndex = messages.findIndex((message) => isRecord(message) && message.id === boundaryMessageID)
+    if (boundaryIndex === -1) return undefined
+  }
+  const end = boundaryIndex === -1 ? messages.length : boundaryIndex
+  let compactionIndex = -1
+  for (let index = end - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (isRecord(message) && message.type === "compaction" && message.status === "completed") {
+      compactionIndex = index
+      break
+    }
+  }
+  for (let index = end - 1; index > compactionIndex; index -= 1) {
+    const message = messages[index]
+    if (isRecord(message) && message.type === "assistant" && isRecord(message.tokens)) return message
+  }
+  return undefined
+}
+
+/**
+ * Sum the tokens of the last usable assistant message and compute its share of
+ * the model's context window. Returns undefined when there is no usage.
+ * Defensive: malformed messages/models never throw; missing token fields count
+ * as zero and a missing `limit.context` yields an undefined percent.
+ */
+export function contextUsage(
+  messages: readonly unknown[],
+  models: readonly unknown[] | undefined,
+  boundaryMessageID?: string,
+): ContextUsage | undefined {
+  const last = lastAssistantWithUsage(messages, boundaryMessageID)
+  if (!isRecord(last) || !isRecord(last.tokens)) return undefined
+  const tokens = last.tokens
+  const cache = isRecord(tokens.cache) ? tokens.cache : {}
+  const total =
+    tokenNumber(tokens.input) +
+    tokenNumber(tokens.output) +
+    tokenNumber(tokens.reasoning) +
+    tokenNumber(cache.read) +
+    tokenNumber(cache.write)
+  if (total <= 0) return undefined
+  const messageModel = isRecord(last.model) ? last.model : undefined
+  const model =
+    messageModel && Array.isArray(models)
+      ? (models.find(
+          (candidate) =>
+            isRecord(candidate) &&
+            candidate.providerID === messageModel.providerID &&
+            candidate.id === messageModel.id,
+        ) as Record<string, unknown> | undefined)
+      : undefined
+  const limit = model && isRecord(model.limit) ? model.limit : undefined
+  const contextLimit = limit ? tokenNumber(limit.context) : 0
+  const percent = contextLimit > 0 ? Math.round((total / contextLimit) * 100) : undefined
+  return { tokens: total, percent }
 }
