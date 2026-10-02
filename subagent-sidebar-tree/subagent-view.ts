@@ -29,17 +29,148 @@ export function descendantSessions(sessions: readonly SubagentSession[], rootID:
   }
 
   const descendants: SubagentSession[] = []
+  const seen = new Set<string>()
   const pending = [...(children.get(rootID) ?? [])]
 
   while (pending.length > 0) {
     const session = pending.shift()
     if (!session) continue
+    // Cycle/malformed-lineage guard: a self-parent or cyclic parentID chain
+    // would otherwise grow `pending` without bound and throw. Each session is
+    // expanded at most once.
+    if (seen.has(session.id)) continue
+    seen.add(session.id)
 
     descendants.push(session)
     pending.push(...(children.get(session.id) ?? []))
   }
 
   return descendants.sort((left, right) => right.time.updated - left.time.updated)
+}
+
+/** A session map keyed by id, or a plain session list. */
+export type SessionsByID =
+  | ReadonlyMap<string, SubagentSession>
+  | readonly SubagentSession[]
+
+function sessionsIndex(sessionsByID: SessionsByID): ReadonlyMap<string, SubagentSession> {
+  if (sessionsByID instanceof Map) return sessionsByID
+  const byID = new Map<string, SubagentSession>()
+  for (const session of sessionsByID) byID.set(session.id, session)
+  return byID
+}
+
+function idSet(value: string | readonly string[] | undefined): Set<string> {
+  const set = new Set<string>()
+  if (typeof value === "string") {
+    const trimmed = value.trim()
+    if (trimmed) set.add(trimmed)
+  } else if (Array.isArray(value)) {
+    for (const id of value) {
+      if (typeof id === "string" && id.trim()) set.add(id.trim())
+    }
+  }
+  return set
+}
+
+/** True when a session has no parent, i.e. it is a root/primary session. */
+export function isRootSession(
+  session: Pick<SubagentSession, "parentID"> | undefined | null,
+): boolean {
+  return !session?.parentID
+}
+
+/**
+ * True only when `ancestorID` sits STRICTLY above `targetID` in the `parentID`
+ * chain. Cycle-safe and missing-parent-safe: a broken chain (a `parentID` that
+ * is absent from `sessionsByID`) returns false, and a cycle terminates false
+ * without ever claiming the target is its own descendant.
+ */
+export function isDescendantOf(
+  targetID: string,
+  ancestorID: string,
+  sessionsByID: SessionsByID,
+): boolean {
+  if (!targetID || !ancestorID) return false
+  // A session is never its own descendant, even inside a parentID cycle.
+  if (targetID === ancestorID) return false
+  const byID = sessionsIndex(sessionsByID)
+  const visited = new Set<string>([targetID])
+  let parentID = byID.get(targetID)?.parentID
+
+  while (parentID) {
+    if (parentID === ancestorID) return true
+    if (visited.has(parentID)) return false
+    visited.add(parentID)
+    const parent = byID.get(parentID)
+    if (!parent) return false // chain breaks before reaching the ancestor
+    parentID = parent.parentID
+  }
+
+  return false
+}
+
+export type AbortTargetsOptions = {
+  /** Select every running descendant of the focused session. */
+  all?: boolean
+  /** When set, restrict the result to these explicit descendant ids. */
+  sessionID?: string | readonly string[]
+  /** Activity resolver; defaults to "running" until a terminal outcome exists. */
+  activityOf?: (session: SubagentSession) => "idle" | "running"
+}
+
+function defaultActivity(session: SubagentSession): "idle" | "running" {
+  return session.outcome == null ? "running" : "idle"
+}
+
+/**
+ * Running descendants of `focusedSessionID`, never the focused session itself
+ * and never a root. With `opts.all` every running descendant is returned;
+ * otherwise only the running descendants named by `opts.sessionID` are.
+ */
+export function abortTargets(
+  focusedSessionID: string,
+  sessions: readonly SubagentSession[],
+  opts: AbortTargetsOptions = {},
+): SubagentSession[] {
+  if (!focusedSessionID) return []
+  const activityOf = opts.activityOf ?? defaultActivity
+  const byID = sessionsIndex(sessions)
+  const running = descendantSessions(sessions, focusedSessionID).filter((session) => {
+    if (isRootSession(session)) return false
+    if (session.id === focusedSessionID) return false
+    if (!isDescendantOf(session.id, focusedSessionID, byID)) return false
+    return activityOf(session) === "running"
+  })
+
+  if (opts.all) return running
+
+  const wanted = idSet(opts.sessionID)
+  if (wanted.size === 0) return []
+  return running.filter((session) => wanted.has(session.id))
+}
+
+export type AbortVerdict = { ok: true } | { ok: false; reason: string }
+
+/**
+ * Validate a single abort target. Rejects roots, self-aborts, sessions that
+ * are not descendants of the caller, and sessions with a terminal outcome.
+ */
+export function assertAbortable(
+  callerSessionID: string,
+  target: SubagentSession | undefined | null,
+  sessionsByID: SessionsByID,
+): AbortVerdict {
+  if (!target || typeof target.id !== "string" || !target.id) {
+    return { ok: false, reason: "not-found" }
+  }
+  if (isRootSession(target)) return { ok: false, reason: "root" }
+  if (target.id === callerSessionID) return { ok: false, reason: "self" }
+  if (!isDescendantOf(target.id, callerSessionID, sessionsByID)) {
+    return { ok: false, reason: "not-descendant" }
+  }
+  if (target.outcome != null) return { ok: false, reason: "terminal" }
+  return { ok: true }
 }
 
 export function subagentStatus(
