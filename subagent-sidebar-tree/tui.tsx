@@ -234,14 +234,10 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
     return mutedColor()
   }
 
-  const rowTone = (value: SubagentStatus): { name: unknown; preview: unknown } => {
-    if (value === "failed") {
-      const red = statusColor("failed")
-      return { name: red, preview: red }
-    }
-    // running / idle / done / stopped all keep the per-agent color for the
-    // NAME and the dim activity color for the preview; only the status label
-    // is tinted (green/red/orange/grey) via statusColor.
+  const rowTone = (): { name: unknown; preview: unknown } => {
+    // Every status keeps the per-agent color for the NAME and the dim activity
+    // color for the preview; only the status label is tinted (green/red/orange/
+    // grey) via statusColor.
     return { name: agentColor(), preview: hovered() ? baseColor() : activityColor() }
   }
 
@@ -255,11 +251,11 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
     >
       <text fg={baseColor()} wrapMode="none">
         <span style={{ get fg() { return mutedColor() } }}>{props.node.prefix}</span>
-        <span style={{ get fg() { return rowTone(status()).name } }}>{shorten(sessionLabel(session()), Math.max(8, 24 - width()))}</span>
+        <span style={{ get fg() { return rowTone().name } }}>{shorten(sessionLabel(session()), Math.max(8, 24 - width()))}</span>
         {" · "}
         <span style={{ get fg() { return statusColor(status()) } }}>{STATUS_LABELS[status()]}</span>
       </text>
-      <text fg={rowTone(status()).preview} wrapMode="none">
+      <text fg={rowTone().preview} wrapMode="none">
         <span style={{ get fg() { return mutedColor() } }}>{props.node.contPrefix}</span>
         {shorten(session().title || subagentTask(messages(), activity()), Math.max(8, 48 - width()))}
       </text>
