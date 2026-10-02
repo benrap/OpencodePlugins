@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
 
-const VIEW =
-  "file:///%USERPROFILE%/.config/opencode/plugins/subagent-sidebar-tree/subagent-view.ts"
-const ABORT =
-  "file:///%USERPROFILE%/.config/opencode/plugins/subagent-sidebar-tree/subagent-abort.ts"
+// Resolve sibling plugin sources relative to this test file so the suite runs
+// against whichever checkout it lives in (repo, git worktree, or a copied live
+// config dir) instead of a hard-coded absolute path.
+const VIEW = new URL("../subagent-view.ts", import.meta.url).href
+const ABORT = new URL("../subagent-abort.ts", import.meta.url).href
 
 const { abortTargets, assertAbortable, isDescendantOf, isRootSession, descendantSessions } = await import(VIEW)
 const {

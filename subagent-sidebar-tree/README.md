@@ -63,9 +63,13 @@ in `package.json` (`oc-plugin: ["server", "tui"]`).
 Requires Node.js >= 22 (uses `--experimental-strip-types` to run the TypeScript
 module directly):
 
+Run from this plugin folder (works in the repo, a git worktree, or a copied
+live config dir — the three `.mjs` suites resolve plugin sources relative to
+the test file):
+
 ```bash
 node --experimental-strip-types test/subagent-sidebar-tree.test.mjs
 node --experimental-strip-types test/subagent-abort.test.mjs
 node --experimental-strip-types test/subagent-server-safe.test.mjs
-node test/tui-jsx-sanity.mjs subagent-sidebar-tree/tui.tsx
+node test/tui-jsx-sanity.mjs tui.tsx
 ```
