@@ -6,6 +6,7 @@ import {
   descendantSessions,
   isActiveSubagent,
   isVisibleSubagent,
+  latestTaskDescription,
   resolveBaseColor,
   resolveMutedColor,
   shorten,
@@ -626,6 +627,110 @@ check("resolveMutedColor: hue.neutral 300 then hardcoded grey", () => {
   assert.equal(resolveMutedColor({ base: "#fff" }, { neutral: { 300: "#666" } }), "#666")
   assert.equal(resolveMutedColor({ base: "#fff" }, {}), "#808080")
   assert.equal(resolveMutedColor(undefined, undefined), "#808080")
+})
+
+// --------------------------- (h) latestTaskDescription (stale title on resume)
+// Newest `task` tool part in the PARENT messages that references the child wins.
+const taskPart = (sessionId, description) => ({
+  type: "tool",
+  name: "task",
+  state: { status: "completed", input: { description }, metadata: { sessionId } },
+})
+
+check("latestTaskDescription: newest matching task part wins (across messages and parts)", () => {
+  const child = "ses_child"
+  const messages = [
+    { type: "assistant", content: [taskPart(child, "oldest")] },
+    { type: "assistant", content: [taskPart(child, "older"), taskPart("ses_other", "other")] },
+    { type: "assistant", content: [taskPart("ses_other", "ignore"), taskPart(child, "newest")] },
+  ]
+  assert.equal(latestTaskDescription(messages, child), "newest")
+})
+
+check("latestTaskDescription: non-matching sessionId is ignored", () => {
+  const messages = [
+    { type: "assistant", content: [taskPart("ses_a", "A"), taskPart("ses_b", "B")] },
+  ]
+  assert.equal(latestTaskDescription(messages, "ses_b"), "B")
+  assert.equal(latestTaskDescription(messages, "ses_c"), undefined)
+})
+
+check("latestTaskDescription: missing metadata/description tolerated", () => {
+  const messages = [
+    {
+      type: "assistant",
+      content: [
+        { type: "tool", name: "task", state: { input: { description: "no meta" } } },
+        taskPart("ses_child", undefined),
+        taskPart(undefined, "no session"),
+      ],
+    },
+  ]
+  assert.equal(latestTaskDescription(messages, "ses_child"), undefined)
+})
+
+check("latestTaskDescription: malformed messages/parts do not throw", () => {
+  const messages = [
+    null,
+    42,
+    "nope",
+    { type: "assistant" },
+    { type: "assistant", content: "bad" },
+    {
+      type: "assistant",
+      content: [
+        null,
+        7,
+        "x",
+        {},
+        { type: "tool" },
+        { type: "tool", name: "task", state: null },
+        { type: "tool", name: "task", state: { metadata: { sessionId: "ses_child" } } },
+      ],
+    },
+  ]
+  let result
+  assert.doesNotThrow(() => {
+    result = latestTaskDescription(messages, "ses_child")
+  })
+  assert.equal(result, undefined)
+})
+
+check("latestTaskDescription: returns undefined when there is no match", () => {
+  const messages = [
+    { type: "assistant", content: [{ type: "text", text: "hello" }] },
+    { type: "user", text: "do a thing" },
+  ]
+  assert.equal(latestTaskDescription(messages, "ses_child"), undefined)
+  assert.equal(latestTaskDescription([], "ses_child"), undefined)
+})
+
+check("latestTaskDescription: accepts alternate tool/metadata/description shapes", () => {
+  // tool-invocation + part.tool + direct metadata + state.title
+  const a = {
+    type: "tool-invocation",
+    tool: "task",
+    metadata: { sessionId: "ses_child" },
+    state: { title: "from state title" },
+  }
+  assert.equal(latestTaskDescription([{ content: [a] }], "ses_child"), "from state title")
+
+  // state.input.sessionID + state.input.description
+  const b = {
+    type: "tool",
+    name: "task",
+    state: { input: { sessionID: "ses_child", description: "from input desc" } },
+  }
+  assert.equal(latestTaskDescription([{ content: [b] }], "ses_child"), "from input desc")
+
+  // state.input.task_id + part.title
+  const c = {
+    type: "tool",
+    name: "task",
+    title: "part title",
+    state: { input: { task_id: "ses_child" } },
+  }
+  assert.equal(latestTaskDescription([{ content: [c] }], "ses_child"), "part title")
 })
 
 console.log(results.join("\n"))

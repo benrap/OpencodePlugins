@@ -6,6 +6,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "so
 import {
   agentColorIndex,
   descendantSessions,
+  latestTaskDescription,
   resolveBaseColor,
   resolveMutedColor,
   shorten,
@@ -106,6 +107,31 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
   const status = () => subagentStatus(session(), activity())
   const messages = () => props.context.data.session.message.list(props.session.id)
   const width = () => props.node.prefix.length
+
+  const parentMessages = () => {
+    const parentID = props.session.parentID
+    if (!parentID) return []
+    try {
+      const list = props.context.data.session.message.list(parentID)
+      return Array.isArray(list) ? list : []
+    } catch {
+      return []
+    }
+  }
+
+  createEffect(() => {
+    const parentID = props.session.parentID
+    // Track the child's last update so a continued/resumed child re-pulls the
+    // parent's messages, where the newest Task description lives.
+    session().time.updated
+    if (!parentID) return
+    try {
+      const sync = props.context.data.session.message.sync
+      if (typeof sync === "function") void sync(parentID).catch(() => {})
+    } catch {
+      /* optional API: the preview falls back to the child's stored title */
+    }
+  })
 
   const baseColor = () => resolveBaseColor(props.context.theme.text)
   const mutedColor = () => resolveMutedColor(props.context.theme.text, props.context.theme.hue)
@@ -257,7 +283,12 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
       </text>
       <text fg={rowTone().preview} wrapMode="none">
         <span style={{ get fg() { return mutedColor() } }}>{props.node.contPrefix}</span>
-        {shorten(session().title || subagentTask(messages(), activity()), Math.max(8, 48 - width()))}
+        {shorten(
+          latestTaskDescription(parentMessages(), props.session.id) ||
+            session().title ||
+            subagentTask(messages(), activity()),
+          Math.max(8, 48 - width()),
+        )}
       </text>
     </box>
   )
@@ -432,6 +463,58 @@ export default Plugin.define({
       syncChildren(context, sessionID, syncState)
     }
 
+    // A continued/resumed child keeps its original `title`; only the PARENT's
+    // newest Task tool call carries the new text. Force a refresh of the session
+    // record AND its parent's messages on real V2 events so the sidebar never
+    // renders a stale title.
+    const refreshSession = (id: unknown) => {
+      if (disposed || typeof id !== "string") return
+      try {
+        const invalidate = (
+          context.data.session as unknown as {
+            invalidate?: (sessionID: string) => void
+          }
+        ).invalidate
+        invalidate?.(id)
+      } catch {
+        /* `invalidate` is optional across V2 builds */
+      }
+      syncState.children.delete(id)
+      syncState.messages.delete(id)
+      try {
+        void context.data.session.sync(id).catch(() => {})
+      } catch {
+        /* best-effort */
+      }
+      try {
+        const parentID = (
+          context.data.session.get(id) as { parentID?: string } | undefined
+        )?.parentID
+        if (parentID) {
+          syncState.messages.delete(parentID)
+          void context.data.session.message.sync(parentID).catch(() => {})
+        }
+      } catch {
+        /* parent lookup is best-effort */
+      }
+    }
+
+    const onEvent = context.data.on as unknown as (
+      type: string,
+      handler: (event: { data?: { sessionID?: unknown; parentID?: unknown } }) => void,
+    ) => () => void
+
+    const subscribe = (
+      type: string,
+      handler: (event: { data?: { sessionID?: unknown; parentID?: unknown } }) => void,
+    ): (() => void) => {
+      try {
+        return onEvent(type, handler)
+      } catch {
+        return () => {}
+      }
+    }
+
     const stopCreated = context.data.on("session.created", (event) => {
       syncParent(event.data.parentID)
     })
@@ -439,6 +522,26 @@ export default Plugin.define({
     const stopStatus = context.data.on("session.status", (event) => {
       syncParent(event.data.sessionID)
     })
+
+    // `session.status` is still declared in the V2 SDK (data.status.type
+    // busy/retry/idle), so it is left in place. The live v2.0.6 stream also emits
+    // `session.execution.*` (verified via the keep-awake plugin); subscribe to
+    // those and `session.renamed` too, so a continued child is never stale.
+    const stopRenamed = subscribe("session.renamed", (event) =>
+      refreshSession(event.data?.sessionID),
+    )
+    const stopExecStarted = subscribe("session.execution.started", (event) =>
+      refreshSession(event.data?.sessionID),
+    )
+    const stopExecSucceeded = subscribe("session.execution.succeeded", (event) =>
+      refreshSession(event.data?.sessionID),
+    )
+    const stopExecFailed = subscribe("session.execution.failed", (event) =>
+      refreshSession(event.data?.sessionID),
+    )
+    const stopExecInterrupted = subscribe("session.execution.interrupted", (event) =>
+      refreshSession(event.data?.sessionID),
+    )
 
     const unregister = context.ui.slot({
       prepend: "sidebar.content",
@@ -451,6 +554,11 @@ export default Plugin.define({
       disposed = true
       stopCreated()
       stopStatus()
+      stopRenamed()
+      stopExecStarted()
+      stopExecSucceeded()
+      stopExecFailed()
+      stopExecInterrupted()
       unregister()
     }
   },

@@ -309,6 +309,73 @@ function latestAssistantActivity(messages: readonly unknown[]): string | undefin
   return undefined
 }
 
+/**
+ * Description of the NEWEST `task` tool call in a PARENT session's messages
+ * that targets `childSessionID`.
+ *
+ * OpenCode does not update a child session's `title` when that child is
+ * continued/resumed, so a sidebar that renders `session.title` goes stale while
+ * the actual chat shows the new text. The authoritative newest text is the
+ * `description` passed to the most recent Task tool call in the parent's
+ * messages (`ctx.metadata({ title: params.description, metadata: { sessionId } })`).
+ *
+ * Scans messages newest -> oldest and, within each, parts newest -> oldest.
+ * Fully defensive (accepts `tool`, `tool-invocation`/`tool_call`, `name`/`tool`,
+ * nested or direct `metadata`/`input`, `sessionId`/`sessionID`/`task_id`/
+ * `taskId`), tolerates malformed input, and never throws.
+ */
+export function latestTaskDescription(
+  messages: readonly unknown[],
+  childSessionID: string,
+): string | undefined {
+  if (!stringValue(childSessionID)) return undefined
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!isRecord(message) || !Array.isArray(message.content)) continue
+
+    for (let partIndex = message.content.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = message.content[partIndex]
+      if (!isRecord(part)) continue
+
+      const type = part.type
+      const isToolPart = type === "tool" || type === "tool-invocation" || type === "tool_call"
+      const name = stringValue(part.name) ?? stringValue(part.tool)
+      if (name !== "task") continue
+      if (!isToolPart && stringValue(part.tool) !== "task") continue
+
+      const state = isRecord(part.state) ? part.state : undefined
+      const stateMetadata = state && isRecord(state.metadata) ? state.metadata : undefined
+      const stateInput = state && isRecord(state.input) ? state.input : undefined
+      const metadata = isRecord(part.metadata) ? part.metadata : undefined
+      const input = isRecord(part.input) ? part.input : undefined
+
+      const referenced =
+        stringValue(stateMetadata?.sessionId) ??
+        stringValue(metadata?.sessionId) ??
+        stringValue(stateInput?.sessionID) ??
+        stringValue(stateInput?.sessionId) ??
+        stringValue(stateInput?.task_id) ??
+        stringValue(stateInput?.taskId) ??
+        stringValue(input?.sessionID) ??
+        stringValue(input?.sessionId) ??
+        stringValue(input?.task_id) ??
+        stringValue(input?.taskId)
+
+      if (referenced !== childSessionID) continue
+
+      const description =
+        stringValue(stateInput?.description) ??
+        stringValue(input?.description) ??
+        stringValue(state?.title) ??
+        stringValue(part.title)
+      if (description) return description
+    }
+  }
+
+  return undefined
+}
+
 export function subagentTask(messages: readonly unknown[], activity: "idle" | "running"): string {
   if (activity === "running") {
     const current = latestAssistantActivity(messages)
