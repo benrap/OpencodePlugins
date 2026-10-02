@@ -20,7 +20,7 @@
  *    "durable":{…},"data":{"sessionID":"ses_…"}}
  *
  * Back-compat fallbacks for the SDK-documented V2 events are handled too:
- *   `session.status` (data.status.type busy/retry/idle), `session.idle`,
+ *   `session.status` (data.status.type busy/retry/idle/error), `session.idle`,
  *   `session.error`.
  *
  * SINGLETON: OpenCode V2 may evaluate this module and call `setup(ctx)` several
@@ -53,6 +53,10 @@ const TAG = '[keep-awake]';
 const DEBUG_FILE = process.env.KEEP_AWAKE_DEBUG_FILE;
 const DEFAULTS = { releaseDelayMs: 1500, maxSeconds: 43200, debug: false };
 
+// Sentinel Set key for events that carry no usable session id. Chosen so it
+// cannot collide with a real `ses_…` id.
+export const UNKNOWN_KEY = '\u0000keep-awake-unknown';
+
 function dbg(msg) {
   if (!DEBUG_FILE) return;
   try { fs.appendFileSync(DEBUG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch { /* ignore */ }
@@ -82,6 +86,64 @@ function sessionIdOf(event) {
 }
 
 // ---------------------------------------------------------------------------
+// Pure helpers (exported for tests).
+// ---------------------------------------------------------------------------
+
+// Normalize a raw event session id to a Set key. A non-empty string is used
+// as-is; anything else collapses to the shared UNKNOWN_KEY sentinel.
+export function normalizeSessionKey(rawId) {
+  return (typeof rawId === 'string' && rawId.length > 0) ? rawId : UNKNOWN_KEY;
+}
+
+// Mark a session busy. Idempotent; returns the normalized key that was added.
+export function busyAcquire(busy, rawId) {
+  const key = normalizeSessionKey(rawId);
+  busy.add(key);
+  return key;
+}
+
+// Clear a session's busy mark, leak-proof against mismatched ids.
+//
+// Heuristic (a mismatched/absent id must never strand an entry forever):
+//   - Real id present in the set        -> delete it.
+//   - Real id absent, sentinel present   -> delete UNKNOWN_KEY (reconciles a
+//     `started` with no id followed by a terminal event that did carry one).
+//   - No usable id                       -> delete UNKNOWN_KEY if present (so an
+//     id-less end mirrors the id-less start that added it); otherwise delete ONE
+//     entry (insertion-order first) so the set cannot become permanently
+//     non-empty.
+// Returns true when an entry was removed.
+export function busyEnd(busy, rawId) {
+  if (typeof rawId === 'string' && rawId.length > 0) {
+    if (busy.has(rawId)) { busy.delete(rawId); return true; }
+    if (busy.has(UNKNOWN_KEY)) { busy.delete(UNKNOWN_KEY); return true; }
+    return false;
+  }
+  if (busy.has(UNKNOWN_KEY)) { busy.delete(UNKNOWN_KEY); return true; }
+  const first = busy.values().next();
+  if (first.done) return false;
+  busy.delete(first.value);
+  return true;
+}
+
+// Seconds left in the cumulative awake budget. `awakeSinceMs` is null when no
+// busy period has started, in which case the full cap remains.
+export function remainingCapSeconds(awakeSinceMs, maxSeconds, nowMs) {
+  const max = Number.isFinite(maxSeconds) ? maxSeconds : DEFAULTS.maxSeconds;
+  if (!Number.isFinite(awakeSinceMs)) return max;
+  return max - (nowMs - awakeSinceMs) / 1000;
+}
+
+// Whether it is safe/useful to (re)spawn the helper right now.
+export function canSpawnHelper({ proc, setupRefs, busyCount: busyN, remainingSeconds }) {
+  if (proc) return false;
+  if (!(setupRefs > 0)) return false;
+  if (!(busyN > 0)) return false;
+  if (!(remainingSeconds > 0)) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Process-wide singleton state. OpenCode may re-evaluate this module per
 // setup() invocation, so state must live on globalThis (shared by all module
 // instances in the same realm) rather than in module-level variables.
@@ -94,6 +156,8 @@ function getState() {
     s = {
       cfg: { ...DEFAULTS },
       busy: new Set(),      // sessionID -> busy
+      awakeSince: null,     // Date.now() when the cumulative busy period began
+      capWarned: false,     // cumulative-cap warning already emitted this period
       proc: null,           // active helper child process
       ready: false,         // helper printed READY
       releaseTimer: null,   // debounce before killing the helper
@@ -113,6 +177,22 @@ function busyCount(S) {
 
 function startHelper(S) {
   if (S.proc) return;
+  const remaining = remainingCapSeconds(S.awakeSince, S.cfg.maxSeconds, Date.now());
+  if (!canSpawnHelper({
+    proc: S.proc,
+    setupRefs: S.setupRefs,
+    busyCount: busyCount(S),
+    remainingSeconds: remaining,
+  })) {
+    // Cumulative cap reached (or not actually needed): do not spawn, and do
+    // not reset the clock by re-spawning with a full maxSeconds.
+    if (busyCount(S) > 0 && S.setupRefs > 0 && remaining <= 0 && !S.capWarned) {
+      S.capWarned = true;
+      warn(`cumulative awake cap reached (maxSeconds=${S.cfg.maxSeconds}); not spawning helper`);
+      dbg('startHelper skipped: cumulative cap reached');
+    }
+    return;
+  }
   let child;
   try {
     child = spawn(
@@ -122,7 +202,7 @@ function startHelper(S) {
         '-ExecutionPolicy', 'Bypass',
         '-File', HELPER,
         '-ParentPid', String(process.pid),
-        '-MaxSeconds', String(S.cfg.maxSeconds),
+        '-MaxSeconds', String(Math.max(1, Math.ceil(remaining))),
       ],
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
     );
@@ -149,15 +229,30 @@ function startHelper(S) {
   });
   child.on('error', (err) => {
     warn('helper process error:', err && err.message ? err.message : err);
+    // A failed spawn never emits 'exit'; clear state so a later acquire retries.
+    if (S.proc === child) { S.proc = null; S.ready = false; }
   });
   child.on('exit', (code, signal) => {
     const wasReady = S.ready;
     S.proc = null;
     S.ready = false;
     dbg(`helper exited code=${code} signal=${signal} wasReady=${wasReady}`);
-    // Recover if sessions are still busy (e.g. helper crashed).
-    if (S.setupRefs > 0 && busyCount(S) > 0) {
-      const t = setTimeout(() => { if (S.setupRefs > 0 && !S.proc && busyCount(S) > 0) startHelper(S); }, 1000);
+    // Recover if sessions are still busy (e.g. helper crashed), but respect
+    // the cumulative cap so a leak cannot re-arm the helper forever.
+    if (canSpawnHelper({
+      proc: S.proc,
+      setupRefs: S.setupRefs,
+      busyCount: busyCount(S),
+      remainingSeconds: remainingCapSeconds(S.awakeSince, S.cfg.maxSeconds, Date.now()),
+    })) {
+      const t = setTimeout(() => {
+        if (canSpawnHelper({
+          proc: S.proc,
+          setupRefs: S.setupRefs,
+          busyCount: busyCount(S),
+          remainingSeconds: remainingCapSeconds(S.awakeSince, S.cfg.maxSeconds, Date.now()),
+        })) startHelper(S);
+      }, 1000);
       if (t.unref) t.unref();
     }
   });
@@ -172,13 +267,20 @@ function startHelper(S) {
 }
 
 function acquire(S, sessionID) {
-  S.busy.add(sessionID || 'unknown');
+  const wasEmpty = S.busy.size === 0;
+  const key = busyAcquire(S.busy, sessionID);
+  if (wasEmpty) {
+    // A new cumulative busy period starts now; the cap clock runs once per
+    // period, not per event.
+    S.awakeSince = Date.now();
+    S.capWarned = false;
+  }
   if (S.releaseTimer) {
     clearTimeout(S.releaseTimer);
     S.releaseTimer = null;
   }
-  if (!S.proc) startHelper(S);
-  if (S.cfg.debug || DEBUG_FILE) dbg(`acquire session=${sessionID} busy=${busyCount(S)}`);
+  startHelper(S);
+  if (S.cfg.debug || DEBUG_FILE) dbg(`acquire session=${key} busy=${busyCount(S)}`);
 }
 
 function killHelper(S, reason) {
@@ -209,32 +311,39 @@ function release(S) {
   if (S.cfg.debug || DEBUG_FILE) dbg(`release scheduled in ${S.cfg.releaseDelayMs}ms`);
 }
 
+function endBusy(S, rawId) {
+  const removed = busyEnd(S.busy, rawId);
+  if (busyCount(S) === 0) S.awakeSince = null;
+  release(S);
+  return removed;
+}
+
 function handle(S, event) {
   try {
     const type = event && event.type;
     if (typeof type !== 'string') return;
-    const id = sessionIdOf(event) || 'unknown';
+    const rawId = sessionIdOf(event);
 
     if (type === EXEC_STARTED) {
-      acquire(S, id);
+      acquire(S, rawId);
       return;
     }
     if (EXEC_ENDED.has(type)) {
-      S.busy.delete(id);
-      release(S);
+      endBusy(S, rawId);
       return;
     }
 
     // Forward/back-compat with the SDK-documented V2 event names.
+    // status.type: busy/retry => still working (acquire); idle/error => ended.
     if (type === 'session.status') {
       const d = event.data || event.properties || {};
       const status = d.status && d.status.type;
-      if (status === 'busy' || status === 'retry') acquire(S, id);
-      else if (status === 'idle') { S.busy.delete(id); release(S); }
+      if (status === 'busy' || status === 'retry') acquire(S, rawId);
+      else if (status === 'idle' || status === 'error') endBusy(S, rawId);
       return;
     }
-    if (type === 'session.idle') { S.busy.delete(id); release(S); return; }
-    if (type === 'session.error') { S.busy.delete(id); release(S); return; }
+    if (type === 'session.idle') { endBusy(S, rawId); return; }
+    if (type === 'session.error') { endBusy(S, rawId); return; }
   } catch (err) {
     warn('event handling failed:', err && err.message ? err.message : err);
   }
@@ -252,7 +361,8 @@ function ensureSubscription(S, ctx) {
       for await (const event of stream) {
         if (DEBUG_FILE && event && typeof event.type === 'string') {
           const acted = event.type === EXEC_STARTED || EXEC_ENDED.has(event.type)
-            || event.type === 'session.status' || event.type === 'session.idle';
+            || event.type === 'session.status' || event.type === 'session.idle'
+            || event.type === 'session.error';
           if (acted) dbg(`event ${event.type} session=${sessionIdOf(event) || '-'}`);
         }
         handle(S, event);
@@ -319,6 +429,7 @@ async function setup(ctx) {
         S.cleanupTimer = setTimeout(() => {
           S.cleanupTimer = null;
           S.busy = new Set();
+          S.awakeSince = null;
           killHelper(S, 'cleanup-grace');
           log('cleanup complete (grace expired)');
         }, 30000);
@@ -326,6 +437,7 @@ async function setup(ctx) {
         log('unloaded with sessions busy; will release in 30s if not reloaded');
       } else {
         S.busy = new Set();
+        S.awakeSince = null;
         killHelper(S, 'cleanup');
         log('cleanup complete');
       }
