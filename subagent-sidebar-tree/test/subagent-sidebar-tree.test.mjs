@@ -17,7 +17,7 @@ import {
   treePrefix,
   visibleSubagentIDs,
   visibleSubagents,
-} from "file:///%USERPROFILE%/.config/opencode/plugins/subagent-sidebar-tree/subagent-view.ts"
+} from "../subagent-view.ts"
 
 const s = (id, parentID, outcome, updated) => ({
   id,
