@@ -1,0 +1,8 @@
+{
+  "name": "@opencode-plugins/subagent-status",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Probe a subagent's state via an LLM-generated summary of its conversation.",
+  "main": "index.js",
+  "oc-plugin": ["server"]
+}
