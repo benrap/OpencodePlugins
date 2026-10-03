@@ -7,7 +7,7 @@ export type SubagentSession = {
   time: { updated: number }
 }
 
-export type SubagentStatus = "running" | "idle" | "done" | "failed" | "stopped"
+export type SubagentStatus = "running" | "waiting" | "idle" | "done" | "failed" | "stopped"
 
 /**
  * Separator between the segments of a subagent row's first line. A SPACED
@@ -123,10 +123,10 @@ export type AbortTargetsOptions = {
   /** When set, restrict the result to these explicit descendant ids. */
   sessionID?: string | readonly string[]
   /** Activity resolver; defaults to "running" until a terminal outcome exists. */
-  activityOf?: (session: SubagentSession) => "idle" | "running"
+  activityOf?: (session: SubagentSession) => "idle" | "running" | "waiting"
 }
 
-function defaultActivity(session: SubagentSession): "idle" | "running" {
+function defaultActivity(session: SubagentSession): "idle" | "running" | "waiting" {
   return session.outcome == null ? "running" : "idle"
 }
 
@@ -182,8 +182,11 @@ export function assertAbortable(
 
 export function subagentStatus(
   session: Pick<SubagentSession, "outcome">,
-  activity: "idle" | "running",
+  activity: "idle" | "running" | "waiting",
 ): SubagentStatus {
+  // `waiting` means the child's turn settled but background work (e.g. a
+  // backgrounded shell) is still outstanding, so it is NOT done yet.
+  if (activity === "waiting") return "waiting"
   if (activity === "running") return "running"
   if (session.outcome === "succeeded") return "done"
   if (session.outcome === "failed") return "failed"
@@ -193,14 +196,15 @@ export function subagentStatus(
 
 export function isActiveSubagent(
   session: Pick<SubagentSession, "outcome">,
-  activity: "idle" | "running",
+  activity: "idle" | "running" | "waiting",
 ): boolean {
-  return subagentStatus(session, activity) === "running"
+  const status = subagentStatus(session, activity)
+  return status === "running" || status === "waiting"
 }
 
 export function activeSubagents(
   sessions: readonly SubagentSession[],
-  activityOf: (sessionID: string) => "idle" | "running",
+  activityOf: (sessionID: string) => "idle" | "running" | "waiting",
 ): SubagentSession[] {
   return sessions.filter((session) => isActiveSubagent(session, activityOf(session.id)))
 }
@@ -217,19 +221,19 @@ export const RECENT_WINDOW_MS = 60_000
  */
 export function isVisibleSubagent(
   session: Pick<SubagentSession, "outcome" | "time">,
-  activity: "idle" | "running",
+  activity: "idle" | "running" | "waiting",
   now: number,
   windowMs = RECENT_WINDOW_MS,
 ): boolean {
   const status = subagentStatus(session, activity)
-  if (status === "running") return true
+  if (status === "running" || status === "waiting") return true
   if (status === "idle") return false
   return now - session.time.updated <= windowMs
 }
 
 export function visibleSubagents(
   sessions: readonly SubagentSession[],
-  activityOf: (sessionID: string) => "idle" | "running",
+  activityOf: (sessionID: string) => "idle" | "running" | "waiting",
   now: number,
   windowMs = RECENT_WINDOW_MS,
 ): SubagentSession[] {
@@ -248,23 +252,23 @@ export function visibleSubagents(
 export function visibleSubagentIDs(
   sessions: readonly SubagentSession[],
   rootID: string,
-  activityOf: (sessionID: string) => "idle" | "running",
+  activityOf: (sessionID: string) => "idle" | "running" | "waiting",
   now: number,
   windowMs = RECENT_WINDOW_MS,
 ): Set<string> {
   const byId = new Map(sessions.map((session) => [session.id, session]))
   const keep = new Set<string>()
 
-  // base: running, or terminal within the recent window
+  // base: running, waiting, or terminal within the recent window
   for (const session of sessions) {
     if (isVisibleSubagent(session, activityOf(session.id), now, windowMs)) keep.add(session.id)
   }
 
-  // keep ancestors of every running session so a running descendant stays nested
-  const isRunning = (session: SubagentSession) =>
-    subagentStatus(session, activityOf(session.id)) === "running"
+  // keep ancestors of every active (running or waiting) session so an active
+  // descendant stays nested
+  const isActive = (session: SubagentSession) => isActiveSubagent(session, activityOf(session.id))
   for (const session of sessions) {
-    if (!isRunning(session)) continue
+    if (!isActive(session)) continue
     let parentID = session.parentID
     while (parentID && parentID !== rootID) {
       keep.add(parentID)
@@ -514,7 +518,7 @@ export function latestTaskDescription(
   return undefined
 }
 
-export function subagentTask(messages: readonly unknown[], activity: "idle" | "running"): string {
+export function subagentTask(messages: readonly unknown[], activity: "idle" | "running" | "waiting"): string {
   if (activity === "running") {
     const current = latestAssistantActivity(messages)
     if (current) return current

@@ -25,6 +25,8 @@ import {
 const MAX_VISIBLE_SUBAGENTS = 8
 const MAX_EXPANDED_HEIGHT = 16
 const CATEGORICAL_STEP = 200
+// Subtle brightening of the side panel background (#141414) for the currently-viewed subagent row
+const CURRENT_HIGHLIGHT_BG = "#1e1e1e"
 
 const FALLBACK_PALETTE: readonly string[] = [
   "#5c9cf5", // blue
@@ -50,6 +52,7 @@ function colorFromCategoricalEntry(entry: unknown): unknown {
 
 const STATUS_LABELS: Record<SubagentStatus, string> = {
   running: "running",
+  waiting: "waiting",
   idle: "idle",
   done: "done",
   failed: "failed",
@@ -103,7 +106,7 @@ function colorKey(value: unknown): string {
   }
 }
 
-function SubagentRow(props: { context: Context; session: SubagentSession; node: SubagentTreeNode }) {
+function SubagentRow(props: { context: Context; session: SubagentSession; node: SubagentTreeNode; currentSessionID?: string }) {
   const [hovered, setHovered] = createSignal(false)
   const session = () => props.context.data.session.get(props.session.id) ?? props.session
   const activity = () => props.context.data.session.status(props.session.id)
@@ -244,8 +247,8 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
   }
 
   const statusColor = (value: SubagentStatus): unknown => {
-    // running -> green, failed -> red, stopped -> orange, done/idle -> mute grey
-    if (value === "running") {
+    // running/waiting -> green, failed -> red, stopped -> orange, done/idle -> mute grey
+    if (value === "running" || value === "waiting") {
       try {
         const theme = props.context.theme as unknown as {
           text?: { feedback?: { success?: { base?: unknown } } }
@@ -294,6 +297,8 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
     return { name: agentColor(), preview: hovered() ? baseColor() : activityColor() }
   }
 
+  const isCurrent = () => props.currentSessionID === props.session.id
+
   return (
     <box
       flexDirection="column"
@@ -314,18 +319,22 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
       </text>
       <text fg={rowTone().preview} wrapMode="none">
         <span style={{ get fg() { return mutedColor() } }}>{props.node.contPrefix}</span>
-        {shorten(
-          latestTaskDescription(parentMessages(), props.session.id) ||
-            session().title ||
-            subagentTask(messages(), activity()),
-          Math.max(8, 48 - width()),
-        )}
+        {/* Styled runs inside <text> must be <span> (a TextNodeRenderable); a
+            nested <text> is a TextRenderable and throws in TextNodeRenderable.add. */}
+        <span style={{ get bg() { return isCurrent() ? CURRENT_HIGHLIGHT_BG : undefined }, get fg() { return isCurrent() ? baseColor() : undefined } }}>
+          {shorten(
+            latestTaskDescription(parentMessages(), props.session.id) ||
+              session().title ||
+              subagentTask(messages(), activity()),
+            Math.max(8, 48 - width()),
+          )}
+        </span>
       </text>
     </box>
   )
 }
 
-function SidebarSubagents(props: { context: Context; sessionID: string; syncState: SyncState }) {
+function SidebarSubagents(props: { context: Context; sessionID: string; syncState: SyncState; overlay?: boolean; currentSessionID?: string }) {
   const { context } = props
   const themedBg = props.context.theme.background as {
     base?: unknown
@@ -359,7 +368,7 @@ function SidebarSubagents(props: { context: Context; sessionID: string; syncStat
 
   createEffect(() => {
     try {
-      const timer = setInterval(() => setNow(Date.now()), 1000)
+      const timer = setInterval(() => setNow(Date.now()), 5000)
       onCleanup(() => clearInterval(timer))
     } catch {
       /* setInterval unavailable: keep the initial timestamp */
@@ -387,7 +396,14 @@ function SidebarSubagents(props: { context: Context; sessionID: string; syncStat
 
   return (
     <Show when={nodes().length > 0}>
-      <box flexDirection="column" paddingBottom={1}>
+      <box
+        flexDirection="column"
+        paddingBottom={1}
+        paddingTop={props.overlay ? 1 : 0}
+        paddingLeft={props.overlay ? 2 : 0}
+        paddingRight={props.overlay ? 2 : 0}
+        backgroundColor={props.overlay ? raisedBg() : undefined}
+      >
         <text fg={context.theme.text.base} wrapMode="none">
           SUBAGENTS ({nodes().length})
         </text>
@@ -397,7 +413,7 @@ function SidebarSubagents(props: { context: Context; sessionID: string; syncStat
             <box flexDirection="column">
               <For each={displayedNodes()}>
                 {(node) => (
-                  <SubagentRow context={context} session={node.session} node={node} />
+                  <SubagentRow context={context} session={node.session} node={node} currentSessionID={props.currentSessionID} />
                 )}
               </For>
               <Show when={nodes().length > MAX_VISIBLE_SUBAGENTS}>
@@ -428,7 +444,7 @@ function SidebarSubagents(props: { context: Context; sessionID: string; syncStat
           >
             <box flexDirection="column" width="100%" minWidth={0}>
               <For each={nodes()}>
-                {(node) => <SubagentRow context={context} session={node.session} node={node} />}
+                {(node) => <SubagentRow context={context} session={node.session} node={node} currentSessionID={props.currentSessionID} />}
               </For>
             </box>
           </scrollbox>
@@ -454,6 +470,45 @@ function SidebarSubagents(props: { context: Context; sessionID: string; syncStat
         </Show>
       </box>
     </Show>
+  )
+}
+
+/**
+ * Subagent family tree contributed to the core right sidebar.
+ *
+ * The core `Sidebar` (and therefore the `sidebar.content` slot) is rendered for
+ * every session, including subagents. It owns the sidebar's width, background,
+ * padding and scroll region and lays the sidebar out as a flex sibling of the
+ * session pane (`packages/tui/src/component/session-frame.tsx`), so the host
+ * resizes the main panel to make room instead of the plugin overlaying it.
+ *
+ * An earlier revision rendered this as an absolutely-positioned overlay from
+ * the `app` slot to work around a host that gated the sidebar off for
+ * `parentID` sessions. That gate is gone, so the overlay only covered the main
+ * panel (or the core sidebar) and has been removed in favour of the slot.
+ *
+ * The whole family is shown (the root's descendants: parent, siblings and
+ * children of the current session), not just the current session's own
+ * children, so the user sees where they are in the tree.
+ */
+export function SubagentSidebar(props: { context: Context; sessionID: string; syncState: SyncState }) {
+  const familyRoot = () => {
+    try {
+      return props.context.data.session.root(props.sessionID)
+    } catch {
+      return props.sessionID
+    }
+  }
+
+  return (
+    <box id="subagent-sidebar" flexDirection="column" width="100%">
+      <SidebarSubagents
+        context={props.context}
+        sessionID={familyRoot()}
+        syncState={props.syncState}
+        currentSessionID={props.sessionID}
+      />
+    </box>
   )
 }
 
@@ -574,10 +629,15 @@ export default Plugin.define({
       refreshSession(event.data?.sessionID),
     )
 
-    const unregister = context.ui.slot({
+    // The core sidebar renders `sidebar.content` for every session — the host
+    // no longer gates it off for `parentID` sessions — and lays the sidebar out
+    // as a flex sibling of the session pane. Contributing the tree here lets
+    // the host resize the main panel to make room, instead of the plugin
+    // overlaying (and covering) it.
+    const unregisterSidebar = context.ui.slot({
       prepend: "sidebar.content",
       render: ({ sessionID }) => (
-        <SidebarSubagents context={context} sessionID={sessionID} syncState={syncState} />
+        <SubagentSidebar context={context} sessionID={sessionID} syncState={syncState} />
       ),
     })
 
@@ -590,7 +650,7 @@ export default Plugin.define({
       stopExecSucceeded()
       stopExecFailed()
       stopExecInterrupted()
-      unregister()
+      unregisterSidebar()
     }
   },
 })
