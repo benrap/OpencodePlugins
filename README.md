@@ -1,15 +1,17 @@
 # OpenCode Plugins
 
-A collection of OpenCode V2 plugins plus one agent, all sourced from this repo.
+A collection of OpenCode V2 plugins, one agent, and a patched-build shim, all
+sourced from this repo.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| [`subagent-sidebar-tree`](./subagent-sidebar-tree) | server + TUI | TUI sidebar panel showing live child subagent sessions as a nested tree. |
-| [`subagent-status`](./subagent-status) | server | `subagent-status` tool that probes a subagent's state via an LLM summary without pulling its raw transcript into the caller's context. |
+| [`subagent-sidebar-tree`](./subagent-sidebar-tree) | server + TUI | TUI sidebar panel showing live child subagent sessions as a nested tree, plus an `abort_subagent` tool to stop descendants. |
+| [`subagent-status`](./subagent-status) | server | `subagent-status` tool that probes a subagent's state without pulling its raw transcript into the caller's context. Two modes: `state` (lightweight, no LLM call) and `summary` (default; adds an LLM summary). |
 | [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
 | [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
-| [`always-background`](./always-background) | server | Forces background execution for `shell` and `subagent` tool calls via the `execute.before` hook. |
-| [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `question`, and `skill` tools are allowed, everything else denied. |
+| [`always-background`](./always-background) | server | Forces background execution for every tool call **except** `shell` and `subagent` via the `execute.before` hook; the exclude list is configurable. |
+| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build from source (sidebar `parentID` gate removal, waiting/tick/abort fix), with cumulative patches and switch/revert scripts. |
+| [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `subagent-status`, `subagent-abort`, `question`, and `skill` tools are allowed, everything else denied. |
 
 ## Installation instructions (for AI agents)
 
@@ -27,7 +29,8 @@ symlink) of the repo folder.
 {
   "plugins": [
     "%USERPROFILE%\\.config\\opencode\\plugins\\keep-awake",
-    "%USERPROFILE%\\.config\\opencode\\plugins\\always-background",
+    { "package": "%USERPROFILE%\\.config\\opencode\\plugins\\always-background",
+      "options": { "exclude": ["shell", "subagent"] } },
     { "package": "%USERPROFILE%\\.config\\opencode\\plugins\\prefill",
       "options": { "mode": "think-reply-continue", "thinkingSeed": "I should answer...",
                    "seed": "I will give my answer:", "userSeed": "Continue" } },
@@ -37,8 +40,10 @@ symlink) of the repo folder.
 }
 ```
 
-Keep each plugin's existing entry (especially `prefill`'s `options`) intact when
-re-registering.
+Keep each plugin's existing entry (especially `prefill`'s `options` and
+`always-background`'s `exclude`) intact when re-registering. If
+`always-background` has no `options.exclude`, it defaults to
+`["shell", "subagent"]`.
 
 ### 2. Refresh a copied plugin
 
@@ -61,7 +66,22 @@ Copy the definition into it:
 Copy-Item -Force .\agents\forced-orchestrator.md "$env:USERPROFILE\.config\opencode\agents\forced-orchestrator.md"
 ```
 
-### 4. Run the tests
+### 4. Install the patched-openCode shim (optional)
+
+`patched-opencode/` makes the `opencode` command resolve to a patched build run
+from source, without touching the stock installation. Apply it with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\patched-opencode\scripts\switch-patched.ps1
+```
+
+Open a **new** shell and verify (`opencode --version` prints `opencode vlocal`).
+Revert with `scripts\revert-patched.ps1`; fresh installs can create the shim dir
+with `scripts\install-shim.ps1`. See
+[`patched-opencode/README.md`](./patched-opencode/README.md) for the patch
+contents, source location, and optional compiled-binary build.
+
+### 5. Run the tests
 
 From `subagent-sidebar-tree/` (the `.mjs` suites are portable):
 
@@ -84,10 +104,19 @@ node test/run-unified-test.mjs
 node test/run-panel-test.mjs
 ```
 
-### 5. Behavior notes
+`keep-awake` has its own portable suite:
 
-- `subagent-sidebar-tree` adapts to the host: a right-pane panel on stock v2.0.22, the 42-col core sidebar on a patched/ungated build.
+```bash
+node keep-awake/test/keep-awake.test.mjs
+```
+
+### 6. Behavior notes
+
+- `subagent-sidebar-tree` adapts to the host: a right-pane panel on stock v2.0.22, the 42-col core sidebar on a patched/ungated build. It also registers `abort_subagent` to stop a caller's own descendant sessions.
+- `subagent-status` defaults to `summary` mode (state + a 2-4 sentence LLM summary). Pass `mode: "state"` for a cheap status check (`running`/`idle`/`waiting`/`finished`) with no LLM call.
+- `always-background` forces `background: true` on every tool call except those in its `exclude` list (default `["shell", "subagent"]`, which keep their own user-controlled `background` input).
 - `keep-awake` keeps the machine awake but lets the display sleep (`keepDisplayOn`/`mode: "display"` to keep it on).
+- `patched-opencode` is a PATH shim, not a plugin: it launches the patched source via `bun run`, so source edits are picked up on the next invocation with no rebuild.
 
 ## License
 
