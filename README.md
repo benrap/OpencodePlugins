@@ -1,106 +1,69 @@
 # OpenCode Plugins
 
-A collection of OpenCode V2 plugins.
+A collection of OpenCode V2 plugins plus one agent, all sourced from this repo.
 
-| Plugin | Type | Description |
+| Item | Type | Description |
 | --- | --- | --- |
-| [`subagent-sidebar-tree`](./subagent-sidebar-tree) | server + TUI | TUI sidebar panel that shows live child subagent sessions as a nested tree. |
-| [`subagent-status`](./subagent-status) | server | Registers a `subagent-status` tool that probes a subagent's state via an LLM-generated summary of its conversation, without pulling the raw transcript into the caller's context. |
-| [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. **Windows-only.** |
-| [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / conversation steering) via a trailing `#prefill` marker that is stripped before persistence. |
-| [`always-background`](./always-background) | server | Actively forces background execution for `shell` and `subagent` tool calls via the `execute.before` hook. |
+| [`subagent-sidebar-tree`](./subagent-sidebar-tree) | server + TUI | TUI sidebar panel showing live child subagent sessions as a nested tree. |
+| [`subagent-status`](./subagent-status) | server | `subagent-status` tool that probes a subagent's state via an LLM summary without pulling its raw transcript into the caller's context. |
+| [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
+| [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
+| [`always-background`](./always-background) | server | Forces background execution for `shell` and `subagent` tool calls via the `execute.before` hook. |
+| [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `question`, and `skill` tools are allowed, everything else denied. |
 
-**Type** comes from the `oc-plugin` field in each plugin's `package.json`:
-`subagent-sidebar-tree` declares `["server", "tui"]` and `subagent-status`
-declares `["server"]`. The three older plugins (`always-background`,
-`keep-awake`, `prefill`) are dependency-free server-side plain-object plugins
-(`export default { id, setup }`) that predate the `oc-plugin` field, so it is
-absent from their `package.json`; their type is inferred from the hooks they
-register.
+## Installation instructions (for AI agents)
 
-## Install
+All paths below are real on this host. Config root: `~/.config/opencode` (`$env:USERPROFILE\.config\opencode`).
 
-Each folder is a self-contained OpenCode V2 plugin. Install one from a local
-checkout with `opencode plugin add`, or reference its path in your
-`opencode.jsonc`:
+### 1. Register plugins in `~/.config/opencode/opencode.jsonc`
+
+Add entries to the top-level `"plugins"` array. `subagent-sidebar-tree` and
+`subagent-status` are referenced **directly from this checkout** (path-based, no
+copy step). `keep-awake`, `always-background`, and `prefill` load from
+`~/.config/opencode/plugins/<name>/`, which must contain a **copy** (never a
+symlink) of the repo folder.
 
 ```jsonc
 {
   "plugins": [
-    { "package": "./OpencodePlugins/prefill" }
+    "%USERPROFILE%\\.config\\opencode\\plugins\\keep-awake",
+    "%USERPROFILE%\\.config\\opencode\\plugins\\always-background",
+    { "package": "%USERPROFILE%\\.config\\opencode\\plugins\\prefill",
+      "options": { "mode": "think-reply-continue", "thinkingSeed": "I should answer...",
+                   "seed": "I will give my answer:", "userSeed": "Continue" } },
+    { "package": "<repo-root>\\subagent-status" },
+    { "package": "<repo-root>\\subagent-sidebar-tree" }
   ]
 }
 ```
 
-See each plugin's README for its own options and usage notes.
+Keep each plugin's existing entry (especially `prefill`'s `options`) intact when
+re-registering.
 
-## Agents
+### 2. Refresh a copied plugin
 
-`agents/forced-orchestrator.md` is an OpenCode **agent** definition, not a
-plugin. It is a nested-delegation orchestrator with no tools of its own except
-the `subagent` tool, plus `question` and `skill`; every other capability (read,
-edit, shell, web, search, glob, grep) is denied via a deny-all-then-allow
-permissions list. It restates the task and acceptance criteria, decomposes the
-task into independent subtasks, launches child subagents in parallel (for
-example `explore` for read-only reconnaissance and `general` for multi-step
-work), has a separate child verify correctness where it matters, and reports
-back with evidence. It is configured with `mode: all`.
+Run from this repo root to copy a plugin into its live dir (repeat per plugin):
 
-## Repository layout and live copies
+```powershell
+Copy-Item -Recurse -Force .\keep-awake\* "$env:USERPROFILE\.config\opencode\plugins\keep-awake\"
+```
 
-This repository is the **single source of truth** for the plugins. All plugin
-projects live together in this one folder, both locally and on GitHub
-(`<repo-root>\<plugin>\`).
+The directly-referenced plugins (`subagent-sidebar-tree`, `subagent-status`)
+need no copy — editing the checkout is enough after OpenCode reloads.
 
-- **Canonical source:** this git repo. Edit, test, commit and push here.
-- **Registration:** all plugins are registered in the `"plugins"` array of
-  `~/.config/opencode/opencode.jsonc`. (`~/.config/opencode/cli.json` also
-  exists, but it holds only TUI display preferences — diffs, sidebar, thinking,
-  animations — and does **not** register any plugins.)
-- **How each plugin is loaded:**
-  - **Referenced directly from this checkout (no copy step):**
-    `subagent-status` and `subagent-sidebar-tree` are registered with their repo
-    paths, e.g.
-    `{ "package": "<repo-root>\\subagent-status" }`.
-    Editing the repo copy changes the live plugin once OpenCode reloads it.
-  - **Copied into the live config dir:** `keep-awake`, `always-background`, and
-    `prefill` are loaded from
-    `%USERPROFILE%\.config\opencode\plugins\<plugin>\`. Those folders are
-    **copies — never symlinks or junctions** — of the repo folders. Refresh a
-    live copy from the checkout, for example:
+### 3. Install the agent
 
-    ```powershell
-    Copy-Item -Recurse -Force .\keep-awake\* `
-      "$env:USERPROFILE\.config\opencode\plugins\keep-awake\"
-    ```
+The live agent dir on this host is `~/.config/opencode/agents/` (**plural**;
+the host also accepts the singular `agent/`, but only `agents/` exists here).
+Copy the definition into it:
 
-    `prefill` is registered with options, so keep its entry in
-    `opencode.jsonc` intact when refreshing the copy.
-- **Workflow:** while a change is in progress, create a git worktree on a
-  throwaway branch and copy from that worktree into the live dir to test it
-  live. Once the change is merged to `main`, copy from `main` (the canonical
-  tree) — the live dirs are disposable consumers of the repo, not sources. For
-  the directly-referenced plugins there is no copy step; point them at the
-  worktree or the canonical tree as needed.
+```powershell
+Copy-Item -Force .\agents\forced-orchestrator.md "$env:USERPROFILE\.config\opencode\agents\forced-orchestrator.md"
+```
 
-### Running the tests
+### 4. Run the tests
 
-Tests live in `subagent-sidebar-tree/test/`:
-
-| File | Purpose |
-| --- | --- |
-| `subagent-sidebar-tree.test.mjs` | Core tree/state logic unit tests. |
-| `subagent-abort.test.mjs` | Abort-targeting and registry tests. |
-| `subagent-server-safe.test.mjs` | Asserts `server.ts` imports with no OpenTUI/Solid/TUI in its resolution graph. |
-| `tui-jsx-sanity.mjs` | Structural sanity check for `tui.tsx` (brace/JSX balance; no toolchain needed). |
-| `subagent-sidebar-visibility.test.tsx` | OpenTUI render test for the sidebar tree; run through `run-visibility-test.mjs`. |
-| `run-visibility-test.mjs` | Copies sources into a temp harness, links OpenTUI `node_modules`, runs `bun test`. |
-| `diagnose-overlay.test.tsx` | Layout diagnostic for the sidebar; run through `run-diagnose-overlay.mjs`. |
-| `run-diagnose-overlay.mjs` | Temp-harness runner for the overlay diagnostic. |
-
-From the `subagent-sidebar-tree` folder (the `.mjs` suites resolve plugin
-sources relative to the test file, so they are portable across the repo, a
-worktree, and a copied live dir):
+From `subagent-sidebar-tree/` (the `.mjs` suites are portable):
 
 ```bash
 node --experimental-strip-types test/subagent-sidebar-tree.test.mjs
@@ -109,20 +72,23 @@ node --experimental-strip-types test/subagent-server-safe.test.mjs
 node test/tui-jsx-sanity.mjs tui.tsx
 ```
 
-The two `bun`-based runners need an OpenTUI `node_modules` (containing
-`@opentui/core`, `@opentui/solid`, and `solid-js`). They default to a local
-OpenCode checkout and can be redirected with the `OPENTUI_NODE_MODULES`
-environment variable:
+The bun harness runners copy sources into a temp dir, link OpenTUI
+`node_modules`, run `bun test`, and clean up. Point `OPENTUI_NODE_MODULES` at a
+`node_modules` containing `@opentui/core`, `@opentui/solid`, and `solid-js` if
+the default is wrong:
 
 ```bash
 node test/run-visibility-test.mjs
 node test/run-diagnose-overlay.mjs
+node test/run-unified-test.mjs
+node test/run-panel-test.mjs
 ```
+
+### 5. Behavior notes
+
+- `subagent-sidebar-tree` adapts to the host: a right-pane panel on stock v2.0.22, the 42-col core sidebar on a patched/ungated build.
+- `keep-awake` keeps the machine awake but lets the display sleep (`keepDisplayOn`/`mode: "display"` to keep it on).
 
 ## License
 
-MIT. See [LICENSE](./LICENSE) for the repository license.
-`subagent-sidebar-tree` is a derivative work based on
-`@madsoftwaredev/opencode-subagent-sidebar` (MIT); see
-[`subagent-sidebar-tree/LICENSE`](./subagent-sidebar-tree/LICENSE) and its
-README for the upstream attribution.
+MIT. See [LICENSE](./LICENSE). `subagent-sidebar-tree` is a derivative work based on `@madsoftwaredev/opencode-subagent-sidebar` (MIT); see [`subagent-sidebar-tree/LICENSE`](./subagent-sidebar-tree/LICENSE).
