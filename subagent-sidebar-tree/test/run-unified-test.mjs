@@ -1,0 +1,53 @@
+/**
+ * Runs the unified-host (both gated and ungated) render test in a throwaway
+ * harness.
+ *
+ * The test imports the plugin's `tui.tsx`, which imports `@opentui/*` and
+ * `solid-js`. The live plugin folder deliberately has no `node_modules` (the
+ * running TUI resolves those itself), so we copy the plugin sources and the
+ * test into a temp folder, link `node_modules` at an OpenCode checkout that
+ * has the OpenTUI packages, run `bun test`, and clean up.
+ *
+ * Point `OPENTUI_NODE_MODULES` at a `node_modules` containing `@opentui/core`,
+ * `@opentui/solid` and `solid-js` if the default path is wrong.
+ *
+ *   node test/run-unified-test.mjs
+ */
+import { copyFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import { spawnSync } from "node:child_process"
+
+const here = dirname(fileURLToPath(import.meta.url))
+const plugin = resolve(here, "..")
+const depRoot =
+  process.env.OPENTUI_NODE_MODULES ??
+  "<opencode-checkout>\\packages\\tui\\node_modules"
+const harness = join(tmpdir(), "subagent-sidebar-unified-harness")
+
+rmSync(harness, { recursive: true, force: true })
+mkdirSync(join(harness, "test"), { recursive: true })
+
+for (const file of ["tui.tsx", "subagent-view.ts"]) {
+  copyFileSync(join(plugin, file), join(harness, file))
+}
+copyFileSync(
+  join(here, "subagent-sidebar-unified.test.tsx"),
+  join(harness, "test", "subagent-sidebar-unified.test.tsx"),
+)
+writeFileSync(join(harness, "bunfig.toml"), '[test]\npreload = ["@opentui/solid/preload"]\n')
+symlinkSync(depRoot, join(harness, "node_modules"), "junction")
+
+let status = 1
+try {
+  const result = spawnSync("bun", ["test", "test/subagent-sidebar-unified.test.tsx"], {
+    cwd: harness,
+    stdio: "inherit",
+    shell: true,
+  })
+  status = result.status ?? 1
+} finally {
+  rmSync(harness, { recursive: true, force: true })
+}
+process.exit(status)

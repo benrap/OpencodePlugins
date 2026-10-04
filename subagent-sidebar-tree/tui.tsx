@@ -78,6 +78,32 @@ const loggedPanelTrees = new Set<string>()
 const loggedPanelWidths = new Set<string>()
 
 /**
+ * Session IDs the host is CURRENTLY rendering the core sidebar for.
+ *
+ * This is the plugin's capability probe for "does this host render the core
+ * sidebar for this session?". The `sidebar.content` slot's render callback only
+ * runs when the host actually mounts the sidebar, and stock v2.0.22 gates the
+ * sidebar off for `parentID` sessions in `sidebarVisible()`. So a subagent ID
+ * is present here iff the running host is the patched/ungated build that serves
+ * subagents from the core sidebar.
+ *
+ * `SubagentSidebar` adds the current route's ID on mount/route change and its
+ * effect-local `onCleanup` removes the previous ID on navigation and the
+ * current one on unmount, so membership means "rendered right now", never
+ * "rendered at some point". Cleared on every activation.
+ */
+const sidebarRenderedSessions = new Set<string>()
+
+/**
+ * Test/debug hook: forget every recorded sidebar render. The live plugin clears
+ * this on activation; tests call it between simulated host modes so one mode's
+ * render cannot leak into the next.
+ */
+export function resetSidebarRenderTracking(): void {
+  sidebarRenderedSessions.clear()
+}
+
+/**
  * Opens the right-pane panel, but only when the terminal is wide enough for the
  * host to split it. When `terminalWidth <= 80` the host forces the panel
  * fullscreen (`canSplit = () => width() > 80` in
@@ -102,6 +128,44 @@ export function openPanelGuarded(context: Context, sessionID: string, parentID: 
   } catch (error) {
     logLive(`panel.open ${source} error=${String(error)}`)
   }
+}
+
+/**
+ * Opens the right-pane panel for a subagent session ONLY when the host did not
+ * render the core sidebar for it.
+ *
+ * The decision is deferred one macrotask so the host can commit the route's
+ * render and effects first: on the patched host the sidebar (and therefore
+ * `SubagentSidebar`) mounts synchronously with the frame and records the
+ * session; on stock v2.0.22 it never mounts. This is deliberately NOT
+ * "close the panel if the sidebar renders": the host gives an active panel
+ * precedence over the sidebar (`rightPane()` in `session-frame.tsx`), so once
+ * the panel opened the sidebar would never render and the duplicate could not
+ * be detected.
+ *
+ * The callback also re-checks the live route before opening, so a timer left
+ * over from a previous navigation can never open the panel for a different
+ * (possibly root) session. Returns the timer so callers can cancel it.
+ */
+export function openPanelIfSidebarAbsent(
+  context: Context,
+  sessionID: string,
+  parentID: string,
+  source: string,
+): ReturnType<typeof setTimeout> {
+  return setTimeout(() => {
+    try {
+      const route = context.ui.router.current()
+      if (route.type !== "session" || route.sessionID !== sessionID) return
+    } catch {
+      return
+    }
+    if (sidebarRenderedSessions.has(sessionID)) {
+      logLive(`panel.skip sessionID=${sessionID} reason=core-sidebar-rendered source=${source}`)
+      return
+    }
+    openPanelGuarded(context, sessionID, parentID, source)
+  }, 0)
 }
 
 function colorFromCategoricalEntry(entry: unknown): unknown {
@@ -557,22 +621,34 @@ function SidebarSubagents(props: {
 /**
  * Subagent family tree contributed to the core right sidebar.
  *
- * The core `Sidebar` (and therefore the `sidebar.content` slot) is rendered for
- * every session, including subagents. It owns the sidebar's width, background,
- * padding and scroll region and lays the sidebar out as a flex sibling of the
- * session pane (`packages/tui/src/component/session-frame.tsx`), so the host
- * resizes the main panel to make room instead of the plugin overlaying it.
+ * The core `Sidebar` (and therefore the `sidebar.content` slot) owns the
+ * sidebar's width, background, padding and scroll region and lays the sidebar
+ * out as a flex sibling of the session pane
+ * (`packages/tui/src/component/session-frame.tsx`), so the host resizes the
+ * main panel to make room instead of the plugin overlaying it.
  *
- * An earlier revision rendered this as an absolutely-positioned overlay from
- * the `app` slot to work around a host that gated the sidebar off for
- * `parentID` sessions. That gate is gone, so the overlay only covered the main
- * panel (or the core sidebar) and has been removed in favour of the slot.
+ * On the patched/ungated host the sidebar renders for subagent sessions too,
+ * so this is where the tree belongs. On stock v2.0.22 the host gates the
+ * sidebar off for `parentID` sessions (`sidebarVisible()`) and `SubagentPanel`
+ * takes over. The tracking effect below is what tells the two apart; see
+ * `openPanelIfSidebarAbsent`.
  *
  * The whole family is shown (the root's descendants: parent, siblings and
  * children of the current session), not just the current session's own
  * children, so the user sees where they are in the tree.
  */
 export function SubagentSidebar(props: { context: Context; sessionID: string; syncState: SyncState }) {
+  // The host invokes this slot's render ONLY when it actually mounts the core
+  // sidebar, so recording the current route session here is the direct signal
+  // `openPanelIfSidebarAbsent` uses to decide whether the sidebar already serves
+  // this session. `onCleanup` inside the effect removes the previous ID when the
+  // route changes and the current one when the sidebar unmounts.
+  createEffect(() => {
+    const id = props.sessionID
+    sidebarRenderedSessions.add(id)
+    onCleanup(() => sidebarRenderedSessions.delete(id))
+  })
+
   const familyRoot = () => {
     try {
       return props.context.data.session.root(props.sessionID)
@@ -662,28 +738,39 @@ export function SubagentPanel(props: { context: Context; sessionID: string; sync
 }
 
 /**
- * Headless route watcher that opens the right-pane panel for subagent sessions.
+ * Headless route watcher that opens the right-pane panel for subagent sessions
+ * ONLY when the core sidebar is not serving the session (see
+ * `openPanelIfSidebarAbsent`).
  *
  * The plugin `Context` exposes no route subscription (`ui.router` only has
  * `register` / `navigate` / `current`), so this is mounted into the
  * always-present `app` slot. `ui.router.current()` reads the host's route
  * store, so a `createEffect` re-runs on every navigation; there is no invented
  * API. Root sessions are left alone (the panel is session-scoped and the host
- * hides it on other routes anyway).
+ * hides it on other routes anyway). Exported so the both-host-mode render test
+ * can drive the real watcher.
  */
-function SubagentPanelAutoOpen(props: { context: Context; syncState: SyncState }) {
+export function SubagentPanelAutoOpen(props: { context: Context; syncState: SyncState }) {
+  let timer: ReturnType<typeof setTimeout> | undefined
   createEffect(() => {
     try {
       const route = props.context.ui.router.current()
+      if (timer) {
+        clearTimeout(timer)
+        timer = undefined
+      }
       if (route.type !== "session") return
       const session = props.context.data.session.get(route.sessionID) as
         | { parentID?: string }
         | undefined
       if (!session?.parentID) return
-      openPanelGuarded(props.context, route.sessionID, session.parentID, "watcher")
+      timer = openPanelIfSidebarAbsent(props.context, route.sessionID, session.parentID, "watcher")
     } catch (error) {
       logLive(`panel.open watcher error=${String(error)}`)
     }
+  })
+  onCleanup(() => {
+    if (timer) clearTimeout(timer)
   })
   return null
 }
@@ -724,6 +811,7 @@ export default Plugin.define({
     loggedPanelOpens.clear()
     loggedPanelTrees.clear()
     loggedPanelWidths.clear()
+    sidebarRenderedSessions.clear()
 
     try {
       const initialRoute = context.ui.router.current()
@@ -872,25 +960,31 @@ export default Plugin.define({
     // Also attempt the initial open directly from setup. `ui.panel.open`
     // returns false until the registration is marked active, which happens
     // after setup returns, so defer to the next macrotask. The watcher above
-    // would cover this too; both calls are idempotent.
-    const initialOpenTimer = setTimeout(() => {
-      if (disposed) return
-      try {
-        const route = context.ui.router.current()
-        if (route.type !== "session") return
+    // would cover this too; both calls are idempotent and both go through the
+    // same sidebar-render check, so neither opens a duplicate.
+    let initialOpenTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const route = context.ui.router.current()
+      if (route.type === "session") {
         const session = context.data.session.get(route.sessionID) as
           | { parentID?: string }
           | undefined
-        if (!session?.parentID) return
-        openPanelGuarded(context, route.sessionID, session.parentID, "initial")
-      } catch (error) {
-        logLive(`panel.open error=${String(error)}`)
+        if (session?.parentID) {
+          initialOpenTimer = openPanelIfSidebarAbsent(
+            context,
+            route.sessionID,
+            session.parentID,
+            "initial",
+          )
+        }
       }
-    }, 0)
+    } catch (error) {
+      logLive(`panel.open error=${String(error)}`)
+    }
 
     return () => {
       disposed = true
-      clearTimeout(initialOpenTimer)
+      if (initialOpenTimer) clearTimeout(initialOpenTimer)
       stopCreated()
       stopStatus()
       stopRenamed()
