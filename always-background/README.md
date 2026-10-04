@@ -1,7 +1,9 @@
 # always-background
 
-An OpenCode V2 plugin that actively forces **background execution** for `shell`
-and `subagent` tool calls, so long-running work never blocks the session.
+An OpenCode V2 plugin that actively forces **background execution** for every
+tool call **except** `shell` and `subagent` (which have their own `background`
+input the user controls explicitly). This prevents tools like `read`, `edit`,
+`subagent-status`, etc. from blocking the session.
 
 ## How it works
 
@@ -16,6 +18,22 @@ It re-registers on every `setup()` (the host drops a plugin generation's
 registrations when that generation is replaced) and never disposes the
 registration. Everything is wrapped in `try/catch` so a plugin error can never
 break host startup.
+
+## Configuration
+
+The exclude list is configurable via the plugin option `exclude`. If not
+provided, it defaults to `['shell', 'subagent']`.
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "./always-background",
+      "options": { "exclude": ["shell", "subagent"] }
+    }
+  ]
+}
+```
 
 ## Install
 

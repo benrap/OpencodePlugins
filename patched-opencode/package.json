@@ -1,0 +1,13 @@
+{
+  "name": "opencode-patched",
+  "version": "1.0.0",
+  "description": "Reversible shim that launches a patched opencode build from source (session waiting status, sidebar gate removal, tick fix).",
+  "author": "benrap",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benrap/OpencodePlugins.git",
+    "directory": "patched-opencode"
+  }
+}

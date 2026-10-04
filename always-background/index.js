@@ -5,8 +5,11 @@
  *     (package.json `main`). The Step-0 logging-only probe is preserved for
  *     provenance as index.probe.js (not loaded).
  *
- * Purpose: force `background: true` on every `shell` and `subagent` tool call
- * so long-running work never blocks the session.
+ * Purpose: force `background: true` on every tool call EXCEPT `shell` and
+ * `subagent` (which have their own `background` input the user controls
+ * explicitly). This prevents tools like `read`, `edit`, `subagent-status`, etc.
+ * from blocking the session. The exclude list is configurable via the plugin
+ * option `exclude` (defaults to `['shell', 'subagent']`).
  *
  * ---------------------------------------------------------------------------
  * MECHANISM (empirically proven on opencode v2.0.6, see probe.log):
@@ -70,6 +73,7 @@ function getState() {
       registering: false,
       registeringSince: 0,
       debugCache: { at: 0, target: undefined },
+      exclude: ['shell', 'subagent'],
     };
     globalThis[STATE_KEY] = s;
   }
@@ -100,7 +104,8 @@ function enforce(event, S) {
   try {
     if (!event || typeof event !== 'object') return;
     const tool = event.tool;
-    if (tool !== 'shell' && tool !== 'subagent') return;
+    const exclude = Array.isArray(S.exclude) ? S.exclude : ['shell', 'subagent'];
+    if (exclude.includes(tool)) return;
     const input = event.input;
     if (!input || typeof input !== 'object') return;
     input.background = true; // in-place mutation is the proven mechanism
@@ -117,6 +122,17 @@ async function setup(ctx) {
   try {
     const S = getState();
     S.setupRefs++;
+
+    // Read the exclude list from plugin options (ctx.options or ctx.config).
+    // Defaults to ['shell', 'subagent'] — the tools that have their own
+    // `background` input the user controls explicitly.
+    const rawOptions = (ctx && (ctx.options || ctx.config)) || {};
+    const rawExclude = rawOptions.exclude;
+    if (Array.isArray(rawExclude) && rawExclude.length > 0) {
+      S.exclude = rawExclude.filter((t) => typeof t === 'string');
+    } else {
+      S.exclude = ['shell', 'subagent'];
+    }
 
     if (!ctx || !ctx.tool || typeof ctx.tool.hook !== 'function') {
       if (!S.warnedNoHook) {

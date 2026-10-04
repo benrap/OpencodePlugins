@@ -1,0 +1,171 @@
+diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
+index 62a6395c9d..f8b3cdd9a2 100644
+--- a/packages/client/src/promise/generated/types.ts
++++ b/packages/client/src/promise/generated/types.ts
+@@ -387,6 +387,7 @@ export type SessionStatus =
+       next: number
+     }
+   | { type: "busy" }
++  | { type: "waiting" }
+ 
+ export type PtyTicketConnectToken = { ticket: string; expires_in: number }
+ 
+diff --git a/packages/core/src/session/execution.ts b/packages/core/src/session/execution.ts
+index eeed241ae1..14f0240b86 100644
+--- a/packages/core/src/session/execution.ts
++++ b/packages/core/src/session/execution.ts
+@@ -5,6 +5,7 @@ import { Bus } from "../bus.js"
+ import { Database } from "../database/database.js"
+ import { Job } from "../job.js"
+ import { Instance } from "../instance/service.js"
++import { SessionStatusEvent } from "@opencode/schema/session-status-event"
+ import { makeGlobalNode } from "@opencode/util/effect/app-node"
+ import { SessionEvent } from "./event.js"
+ import { SessionRunCoordinator } from "./run-coordinator.js"
+@@ -122,12 +123,26 @@ export const layer = Layer.effect(
+           Effect.gen(function* () {
+             const outcome = terminal(exit, reason)
+             if (outcome.type === "succeeded") {
++              if (yield* jobs.awaiting(sessionID)) {
++                // The turn is not complete: background work will resume it. Withhold the
++                // terminal so clients keep the Session active (no tick) until that work
++                // finishes. Recovery of a waiting turn is owned by its durable background
++                // Job record, not the orphaned-claim sweep, so release the claim now
++                // instead of leaving it to look like a turn that died mid-flight.
++                yield* bus.publish(SessionStatusEvent.Status, { sessionID, status: { type: "waiting" } })
++                yield* store.release(sessionID)
++                return
++              }
+               yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
+               return
+             }
+             if (outcome.type === "interrupted") {
+               // Deliberate stops release the claim; shutdown keeps it for restart continuity.
+-              if (outcome.reason !== "shutdown") yield* jobs.cancel(sessionID)
++              if (outcome.reason !== "shutdown") {
++                yield* jobs.cancel(sessionID)
++                const pending = yield* jobs.pendingFor(sessionID)
++                yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
++              }
+               yield* bus.publish(
+                 SessionEvent.Execution.Interrupted,
+                 { sessionID, reason: outcome.reason },
+diff --git a/packages/core/test/session-execution.test.ts b/packages/core/test/session-execution.test.ts
+index d6cafcf7b5..ff66dbcfb8 100644
+--- a/packages/core/test/session-execution.test.ts
++++ b/packages/core/test/session-execution.test.ts
+@@ -17,6 +17,7 @@ import { Session } from "@opencode/core/session"
+ import { SessionExecution } from "@opencode/core/session/execution"
+ import { SessionRestart } from "@opencode/core/session/execution/restart"
+ import { SessionEvent } from "@opencode/core/session/event"
++import { SessionStatusEvent } from "@opencode/schema/session-status-event"
+ import { SessionInbox } from "@opencode/core/session/inbox"
+ import { SessionMessage } from "@opencode/core/session/message"
+ import { SessionRunner } from "@opencode/core/session/runner/index"
+@@ -373,6 +374,77 @@ describe("SessionExecution lifecycle", () => {
+       expect((yield* claims(database))[sessionID]).toBe(true)
+     }),
+   )
++
++  it.effect("reports waiting without a terminal while a settled Session has outstanding background work", () =>
++    Effect.gen(function* () {
++      const database = yield* Database.Service
++      const bus = yield* Bus.Service
++      const jobs = yield* Job.Service
++      const sessionID = Session.ID.make("ses_waiting_background")
++      yield* seedSessions(database, [sessionID])
++
++      const gate = yield* Deferred.make<void>()
++      const shell = yield* jobs.start({
++        id: "sh_waiting",
++        type: "shell",
++        title: "sleep",
++        recovery: { kind: "shell", sessionID, shellID: "sh_waiting", command: "sleep" },
++        run: Deferred.await(gate).pipe(Effect.as("")),
++      })
++      const marker = yield* jobs.background(shell.id)
++      if (!marker?.notificationID) return yield* Effect.die("expected background marker")
++
++      // Collect every terminal/status event for this Session. While background work
++      // is outstanding the Session must publish only `waiting`: clients reduce
++      // `succeeded` to idle unconditionally, which renders the tick. The terminal is
++      // withheld until the background work resumes and completes the turn.
++      // Record terminal/status events through a listener, which the bus invokes
++      // synchronously, so the assertion does not depend on PubSub delivery timing.
++      const observed: string[] = []
++      const waiting = yield* Deferred.make<void>()
++      const succeeded = yield* Deferred.make<void>()
++      yield* bus.listen((event) =>
++        Effect.suspend(() => {
++          const data = event.data as { sessionID?: string }
++          if (data.sessionID !== sessionID) return Effect.void
++          if (
++            event.type !== SessionEvent.Execution.Succeeded.type &&
++            event.type !== SessionStatusEvent.Status.type
++          )
++            return Effect.void
++          observed.push(event.type)
++          if (event.type === SessionStatusEvent.Status.type)
++            return Deferred.succeed(waiting, undefined).pipe(Effect.asVoid)
++          return Deferred.succeed(succeeded, undefined).pipe(Effect.asVoid)
++        }),
++      )
++
++      const scope = yield* Scope.make()
++      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
++      const context = yield* buildExecution(scope, () => Effect.void)
++      const execution = Context.get(context, SessionExecution.Service)
++      yield* execution.resume(sessionID).pipe(Effect.forkScoped)
++      // Wait for the waiting status, then for settlement: the terminal (if any)
++      // is published before the execution settles, so this sees it.
++      yield* Deferred.await(waiting)
++      yield* execution.awaitIdle(sessionID)
++
++      expect(observed).toEqual([SessionStatusEvent.Status.type])
++      // The claim is released while waiting so the Session is not swept as an
++      // orphaned in-flight turn; its recovery is owned by the durable Job record.
++      expect((yield* claims(database))[sessionID]).toBe(false)
++
++      // Once the background notification is acknowledged, the Session is no longer waiting.
++      yield* jobs.completeBackground(marker.notificationID)
++      expect(yield* jobs.awaiting(sessionID)).toBe(false)
++
++      // Resuming with no outstanding work publishes the terminal, so the tick appears.
++      yield* execution.resume(sessionID).pipe(Effect.forkScoped)
++      yield* Deferred.await(succeeded)
++      yield* execution.awaitIdle(sessionID)
++      expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Succeeded.type])
++    }),
++  )
+ })
+ 
+ describe("SessionRestart background recovery", () => {
+diff --git a/packages/tui/src/context/session-tabs.tsx b/packages/tui/src/context/session-tabs.tsx
+index 7b7f9f8c1c..a2ae49050e 100644
+--- a/packages/tui/src/context/session-tabs.tsx
++++ b/packages/tui/src/context/session-tabs.tsx
+@@ -169,7 +169,7 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
+         // Parked synthetic context (user shells, plan reminders) stays pending without execution; only work counts as busy.
+         busy: members.some(
+           (id) =>
+-            data.session.status(id) === "running" ||
++            data.session.status(id) !== "idle" ||
+             data.session.pending.list(id).some((item) => item.type !== "synthetic"),
+         ),
+         renaming: data.session.title.pending(session),
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index d75c1e0bd8..cae3bbdc51 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -3106,7 +3106,10 @@ function Subagent(props: ToolProps) {
+   const model = createMemo(() => subagentModelLabel(stringValue(props.input.model), data.location.model.list()))
+   const isRunning = createMemo(() => {
+     const id = sessionID()
+-    return props.part.state.status === "running" || Boolean(id && data.session.status(id) === "running")
++    if (props.part.state.status === "running") return true
++    if (!id) return false
++    const status = data.session.status(id)
++    return status === "running" || status === "waiting"
+   })
+ 
+   return (

@@ -60,7 +60,8 @@ const TOOL_DESCRIPTION =
   'and returns an LLM-generated 2-4 sentence summary of what it is doing, its ' +
   'status (running/completed/failed/blocked), key findings and decisions, ' +
   'blockers, and the likely next step. Pass the subagent\'s sessionID (the id ' +
-  'returned when it was spawned).';
+  'returned when it was spawned). Set mode to "state" for a lightweight ' +
+  'status check (running/idle/waiting/finished) without an LLM call.';
 
 const INPUT_SCHEMA = {
   type: 'object',
@@ -81,6 +82,14 @@ const INPUT_SCHEMA = {
         'Optional model used to generate the summary, as "providerID/modelID" ' +
         '(e.g. "anthropic/claude-sonnet-4-20250514"). Defaults to the configured model.',
     },
+    mode: {
+      type: 'string',
+      enum: ['state', 'summary'],
+      default: 'summary',
+      description:
+        '"state" returns only the session state (running/idle/waiting/finished) ' +
+        'without an LLM call. "summary" also generates an LLM summary.',
+    },
   },
   required: ['sessionID'],
   additionalProperties: false,
@@ -90,6 +99,10 @@ const OUTPUT_SCHEMA = {
   type: 'object',
   properties: {
     sessionID: { type: 'string' },
+    state: {
+      type: 'string',
+      description: 'Session state: running, idle, waiting, or finished.',
+    },
     summary: { type: 'string' },
     error: { type: 'string' },
   },
@@ -400,6 +413,68 @@ async function generateSummary(ctx, { sessionID, prompt, model }) {
 }
 
 // ---------------------------------------------------------------------------
+// State determination.
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine the session state: 'running', 'idle', 'waiting', or 'finished'.
+ *
+ * Logic:
+ *   1. If ctx.session.get reports an outcome of succeeded/failed/interrupted,
+ *      the session is 'finished'.
+ *   2. Otherwise, inspect the last message:
+ *      - No messages -> 'idle'
+ *      - Last message is 'user' -> 'idle' (waiting for agent to respond)
+ *      - Last message is 'assistant' with a running/streaming tool -> 'running'
+ *      - Last message is 'assistant' with all tools completed -> 'waiting'
+ *      - Anything else -> 'idle'
+ *
+ * On any error, returns 'idle' as a safe default.
+ */
+async function determineState(ctx, sessionID, messages) {
+  try {
+    // 1. Check session outcome via ctx.session.get.
+    const get = ctx && ctx.session && ctx.session.get;
+    if (typeof get === 'function') {
+      const result = await get({ sessionID });
+      const info =
+        result && typeof result === 'object' && result.data && typeof result.data === 'object'
+          ? result.data
+          : result;
+      if (info && typeof info === 'object') {
+        const outcome = info.outcome;
+        if (outcome === 'succeeded' || outcome === 'failed' || outcome === 'interrupted') {
+          return 'finished';
+        }
+      }
+    }
+
+    // 2. Message-based logic.
+    if (!Array.isArray(messages) || messages.length === 0) return 'idle';
+
+    const last = messages[messages.length - 1];
+    if (!last || typeof last !== 'object') return 'idle';
+
+    if (last.type === 'user') return 'idle';
+
+    if (last.type === 'assistant') {
+      const content = Array.isArray(last.content) ? last.content : [];
+      for (const part of content) {
+        if (part && part.type === 'tool' && part.state) {
+          const status = part.state.status;
+          if (status === 'running' || status === 'streaming') return 'running';
+        }
+      }
+      return 'waiting';
+    }
+
+    return 'idle';
+  } catch {
+    return 'idle';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool definition.
 // ---------------------------------------------------------------------------
 
@@ -413,10 +488,11 @@ function makeTool(ctx) {
     execute: async (input) => {
       const args = input && typeof input === 'object' ? input : {};
       const sessionID = typeof args.sessionID === 'string' ? args.sessionID.trim() : '';
+      const mode = args.mode === 'state' ? 'state' : 'summary';
 
       if (!sessionID) {
         const message = 'subagent-status: `sessionID` is required.';
-        return { output: { sessionID: '', error: 'missing-sessionID' }, content: message };
+        return { output: { sessionID: '', state: 'idle', error: 'missing-sessionID' }, content: message };
       }
 
       const limit =
@@ -425,25 +501,31 @@ function makeTool(ctx) {
           : DEFAULT_LIMIT;
       const model = parseModel(args.model);
 
+      let state = 'idle';
       try {
         const messages = await readMessages(ctx, sessionID, limit);
+        state = await determineState(ctx, sessionID, messages);
+
+        if (mode === 'state') {
+          return { output: { sessionID, state }, content: state };
+        }
 
         if (!messages.length) {
           const summary =
             `No messages were found for session ${sessionID}. It may not have ` +
             'started yet, may have been deleted, or the session id may be wrong.';
-          return { output: { sessionID, summary }, content: summary };
+          return { output: { sessionID, state, summary }, content: summary };
         }
 
         const transcript = formatTranscript(messages);
         const prompt = buildPrompt(transcript);
         const summary = await generateSummary(ctx, { sessionID, prompt, model });
 
-        return { output: { sessionID, summary }, content: summary };
+        return { output: { sessionID, state, summary }, content: summary };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return {
-          output: { sessionID, error: message },
+          output: { sessionID, state, error: message },
           content: `subagent-status: failed to summarise session ${sessionID}: ${message}`,
         };
       }
