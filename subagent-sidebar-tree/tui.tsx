@@ -1,8 +1,9 @@
 /** @jsxImportSource @opentui/solid */
 
+import { appendFileSync } from "node:fs"
 import { Plugin } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/context"
-import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
   agentColorIndex,
   contextUsage,
@@ -36,6 +37,72 @@ const FALLBACK_PALETTE: readonly string[] = [
   "#e06c75", // red
   "#56b6c2", // cyan
 ]
+
+const PLUGIN_ID = "subagent-sidebar-tree"
+/** Panel name registered in `session.panel`; contributions gate on it. */
+const PANEL_NAME = "subagent-tree"
+/**
+ * Core right-sidebar width (`SESSION_SIDEBAR_WIDTH` in
+ * `packages/tui/src/component/session-frame.tsx`). The `session.panel` right
+ * pane does NOT use this value — the host sizes it to ~50% of the terminal —
+ * so it is only logged for comparison, never assumed.
+ */
+const SESSION_SIDEBAR_WIDTH = 42
+/**
+ * The host forces a panel fullscreen when the terminal is at or below this
+ * width (`canSplit = () => width() > 80` in
+ * `packages/tui/src/context/panel.tsx`). In fullscreen `pane.focus.left` is
+ * disabled and the prompt cannot be refocused, so the plugin must not open the
+ * panel on a narrow terminal (it would trap focus).
+ */
+const MIN_PANEL_TERMINAL_WIDTH = 80
+const LIVE_LOG_PATH = "<temp-checkout>\\subagent-sidebar-tree-live.log"
+
+/**
+ * Best-effort live log for diagnosing the right-pane panel at runtime. Every
+ * call is wrapped so a missing path or a locked file can never break the
+ * plugin. Format: `<ISO timestamp> <message>`.
+ */
+function logLive(message: string): void {
+  try {
+    appendFileSync(LIVE_LOG_PATH, `${new Date().toISOString()} ${message}\n`)
+  } catch {
+    /* best-effort: logging must never break the plugin */
+  }
+}
+
+// Panel-open / tree-render / width logging is deduped per session so reactive
+// re-renders do not spam the log. All are cleared on every activation.
+const loggedPanelOpens = new Set<string>()
+const loggedPanelTrees = new Set<string>()
+const loggedPanelWidths = new Set<string>()
+
+/**
+ * Opens the right-pane panel, but only when the terminal is wide enough for the
+ * host to split it. When `terminalWidth <= 80` the host forces the panel
+ * fullscreen (`canSplit = () => width() > 80` in
+ * `packages/tui/src/context/panel.tsx`); in fullscreen `pane.focus.left` is
+ * disabled and `focusSession()` early-returns, so the prompt cannot be
+ * refocused (a focus trap). `context.renderer.terminalWidth` is the only
+ * plugin-accessible width read, so skip the open when it is unknown or too
+ * small. The host-assigned pane width cannot be set from a plugin (there is no
+ * width option on `ui.panel.open` and no pane-resize command).
+ */
+export function openPanelGuarded(context: Context, sessionID: string, parentID: string, source: string): void {
+  try {
+    const width = context.renderer.terminalWidth
+    if (!(width > MIN_PANEL_TERMINAL_WIDTH)) {
+      logLive(`panel.skip sessionID=${sessionID} reason=narrow-terminal width=${width}`)
+      return
+    }
+    if (context.ui.panel.open(PANEL_NAME) && !loggedPanelOpens.has(sessionID)) {
+      loggedPanelOpens.add(sessionID)
+      logLive(`panel.open sessionID=${sessionID} parentID=${parentID} width=${width}`)
+    }
+  } catch (error) {
+    logLive(`panel.open ${source} error=${String(error)}`)
+  }
+}
 
 function colorFromCategoricalEntry(entry: unknown): unknown {
   if (!entry) return undefined
@@ -334,7 +401,15 @@ function SubagentRow(props: { context: Context; session: SubagentSession; node: 
   )
 }
 
-function SidebarSubagents(props: { context: Context; sessionID: string; syncState: SyncState; overlay?: boolean; currentSessionID?: string }) {
+function SidebarSubagents(props: {
+  context: Context
+  sessionID: string
+  syncState: SyncState
+  overlay?: boolean
+  currentSessionID?: string
+  /** Optional observer for the flattened tree; used by the right-pane panel to log what rendered. */
+  onNodes?: (nodes: SubagentTreeNode[]) => void
+}) {
   const { context } = props
   const themedBg = props.context.theme.background as {
     base?: unknown
@@ -365,6 +440,12 @@ function SidebarSubagents(props: { context: Context; sessionID: string; syncStat
   const displayedNodes = createMemo(() =>
     expanded() ? nodes() : nodes().slice(0, MAX_VISIBLE_SUBAGENTS),
   )
+
+  // Let a host (the right-pane panel) observe what actually rendered. The
+  // callback is expected to dedupe; this effect re-runs on every tree change.
+  createEffect(() => {
+    props.onNodes?.(nodes())
+  })
 
   createEffect(() => {
     try {
@@ -512,6 +593,101 @@ export function SubagentSidebar(props: { context: Context; sessionID: string; sy
   )
 }
 
+/**
+ * Subagent family tree contributed to the right-pane `session.panel` slot.
+ *
+ * The core sidebar is gated off for subagent (`parentID`) sessions on v2.0.22,
+ * so `sidebar.content` never mounts for them. This panel is the fallback: the
+ * host renders `session.panel` in the right pane for whatever session route is
+ * active, so registering here puts the tree in the right pane for subagents.
+ * It reuses the same `SidebarSubagents` tree and `syncChildren`/`syncMessages`
+ * wiring as the sidebar, so both hosts stay in lockstep.
+ *
+ * Focus tradeoff: the host focuses the panel node on mount (`PanelHost`'s
+ * `onMount` -> `onTarget` -> `focusRightPane` -> `panelNode.focus()`), stealing
+ * focus from the prompt. There is no `ui.focus` API and no way to suppress that
+ * focus steal, so after the panel mounts we dispatch the host's
+ * `pane.focus.left` command, which blurs the right pane and refocuses the
+ * prompt. That command is only enabled while `activePanel() !== undefined`
+ * (true once this panel is mounted), and `setTimeout` defers the dispatch past
+ * the host's synchronous mount-time focus call.
+ */
+export function SubagentPanel(props: { context: Context; sessionID: string; syncState: SyncState }) {
+  const familyRoot = () => {
+    try {
+      return props.context.data.session.root(props.sessionID)
+    } catch {
+      return props.sessionID
+    }
+  }
+
+  const logTree = (nodes: SubagentTreeNode[]) => {
+    if (loggedPanelTrees.has(props.sessionID)) return
+    loggedPanelTrees.add(props.sessionID)
+    const labels = nodes
+      .slice(0, 4)
+      .map((node) => sessionLabel(node.session))
+      .join(",")
+    logLive(`panel.tree sessionID=${props.sessionID} nodes=${nodes.length} labels=${labels}`)
+  }
+
+  onMount(() => {
+    const timer = setTimeout(() => {
+      try {
+        props.context.keymap?.dispatch("pane.focus.left")
+        logLive(`panel.focus sessionID=${props.sessionID} dispatch=pane.focus.left`)
+      } catch (error) {
+        logLive(`panel.focus sessionID=${props.sessionID} error=${String(error)}`)
+      }
+    }, 50)
+    onCleanup(() => clearTimeout(timer))
+  })
+
+  return (
+    <box id="subagent-panel" flexDirection="column" width="100%" height="100%">
+      <box flexShrink={0} paddingBottom={1}>
+        <text fg={props.context.theme.text.base} wrapMode="none">
+          Subagent tree
+        </text>
+      </box>
+      <SidebarSubagents
+        context={props.context}
+        sessionID={familyRoot()}
+        syncState={props.syncState}
+        currentSessionID={props.sessionID}
+        onNodes={logTree}
+      />
+    </box>
+  )
+}
+
+/**
+ * Headless route watcher that opens the right-pane panel for subagent sessions.
+ *
+ * The plugin `Context` exposes no route subscription (`ui.router` only has
+ * `register` / `navigate` / `current`), so this is mounted into the
+ * always-present `app` slot. `ui.router.current()` reads the host's route
+ * store, so a `createEffect` re-runs on every navigation; there is no invented
+ * API. Root sessions are left alone (the panel is session-scoped and the host
+ * hides it on other routes anyway).
+ */
+function SubagentPanelAutoOpen(props: { context: Context; syncState: SyncState }) {
+  createEffect(() => {
+    try {
+      const route = props.context.ui.router.current()
+      if (route.type !== "session") return
+      const session = props.context.data.session.get(route.sessionID) as
+        | { parentID?: string }
+        | undefined
+      if (!session?.parentID) return
+      openPanelGuarded(props.context, route.sessionID, session.parentID, "watcher")
+    } catch (error) {
+      logLive(`panel.open watcher error=${String(error)}`)
+    }
+  })
+  return null
+}
+
 function syncMessages(context: Context, sessionID: string, state: SyncState): void {
   if (state.messages.has(sessionID)) return
   state.messages.add(sessionID)
@@ -542,6 +718,22 @@ export default Plugin.define({
     const syncState: SyncState = {
       children: new Set(),
       messages: new Set(),
+    }
+
+    // Fresh dedupe state for this activation.
+    loggedPanelOpens.clear()
+    loggedPanelTrees.clear()
+    loggedPanelWidths.clear()
+
+    try {
+      const initialRoute = context.ui.router.current()
+      const initialSessionID = initialRoute.type === "session" ? initialRoute.sessionID : undefined
+      logLive(
+        `activation plugin=${PLUGIN_ID} route=${initialRoute.type}` +
+          (initialSessionID ? ` sessionID=${initialSessionID}` : ""),
+      )
+    } catch (error) {
+      logLive(`activation plugin=${PLUGIN_ID} error=${String(error)}`)
     }
 
     const syncParent = (sessionID: string | undefined) => {
@@ -629,11 +821,10 @@ export default Plugin.define({
       refreshSession(event.data?.sessionID),
     )
 
-    // The core sidebar renders `sidebar.content` for every session — the host
-    // no longer gates it off for `parentID` sessions — and lays the sidebar out
-    // as a flex sibling of the session pane. Contributing the tree here lets
-    // the host resize the main panel to make room, instead of the plugin
-    // overlaying (and covering) it.
+    // Root sessions keep the tree in the core sidebar (`sidebar.content`).
+    // v2.0.22 gates that sidebar off for `parentID` sessions, so the panel
+    // registration below is the fallback that renders the same tree in the
+    // right pane for subagents.
     const unregisterSidebar = context.ui.slot({
       prepend: "sidebar.content",
       render: ({ sessionID }) => (
@@ -641,8 +832,65 @@ export default Plugin.define({
       ),
     })
 
+    // The right-pane `session.panel` slot. The host renders it for whichever
+    // panel is active, so gate on the panel name: other plugins' panels must
+    // not get our tree injected into them.
+    const unregisterPanel = context.ui.slot({
+      prepend: "session.panel",
+      render: (input) => {
+        if (input.name === PANEL_NAME) {
+          try {
+            const width = input.width
+            const key = `${input.sessionID}:${width}`
+            if (!loggedPanelWidths.has(key)) {
+              loggedPanelWidths.add(key)
+              logLive(
+                `panel.width sessionID=${input.sessionID} width=${width} sidebarWidth=${SESSION_SIDEBAR_WIDTH} delta=${width - SESSION_SIDEBAR_WIDTH}`,
+              )
+            }
+          } catch (error) {
+            logLive(`panel.width error=${String(error)}`)
+          }
+        }
+        return (
+          <Show when={input.name === PANEL_NAME}>
+            <SubagentPanel context={context} sessionID={input.sessionID} syncState={syncState} />
+          </Show>
+        )
+      },
+    })
+
+    // `ui.router` exposes no route subscription, so open the panel for
+    // subagent routes through a headless watcher in the always-mounted `app`
+    // slot (see SubagentPanelAutoOpen). This covers both the initial route and
+    // later navigation into a subagent.
+    const unregisterPanelAutoOpen = context.ui.slot({
+      prepend: "app",
+      render: () => <SubagentPanelAutoOpen context={context} syncState={syncState} />,
+    })
+
+    // Also attempt the initial open directly from setup. `ui.panel.open`
+    // returns false until the registration is marked active, which happens
+    // after setup returns, so defer to the next macrotask. The watcher above
+    // would cover this too; both calls are idempotent.
+    const initialOpenTimer = setTimeout(() => {
+      if (disposed) return
+      try {
+        const route = context.ui.router.current()
+        if (route.type !== "session") return
+        const session = context.data.session.get(route.sessionID) as
+          | { parentID?: string }
+          | undefined
+        if (!session?.parentID) return
+        openPanelGuarded(context, route.sessionID, session.parentID, "initial")
+      } catch (error) {
+        logLive(`panel.open error=${String(error)}`)
+      }
+    }, 0)
+
     return () => {
       disposed = true
+      clearTimeout(initialOpenTimer)
       stopCreated()
       stopStatus()
       stopRenamed()
@@ -651,6 +899,8 @@ export default Plugin.define({
       stopExecFailed()
       stopExecInterrupted()
       unregisterSidebar()
+      unregisterPanel()
+      unregisterPanelAutoOpen()
     }
   },
 })
