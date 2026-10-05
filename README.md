@@ -5,7 +5,8 @@ sourced from this repo.
 
 | Item | Type | Description |
 | --- | --- | --- |
-| [`subagent-sidebar-tree`](./subagent-sidebar-tree) | server + TUI | TUI sidebar panel showing live child subagent sessions as a nested tree, plus an `abort_subagent` tool to stop descendants. |
+| [`subagent-abort`](./subagent-abort) | server | Registers the `abort_subagent` tool to interrupt active descendant subagent sessions of the calling session (one named descendant, or every running descendant). |
+| [`subagent-sidebar-tree`](./subagent-sidebar-tree) | TUI | TUI sidebar panel showing live child subagent sessions as a nested tree. |
 | [`subagent-status`](./subagent-status) | server | `subagent-status` tool that probes a subagent's state without pulling its raw transcript into the caller's context. Two modes: `state` (lightweight, no LLM call) and `summary` (default; adds an LLM summary). |
 | [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
 | [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
@@ -20,9 +21,10 @@ your own. Config root: `~/.config/opencode` (`$env:USERPROFILE\.config\opencode`
 
 ### 1. Register plugins in `~/.config/opencode/opencode.jsonc`
 
-Add entries to the top-level `"plugins"` array. `subagent-sidebar-tree` and
-`subagent-status` are referenced **directly from this checkout** (path-based, no
-copy step). `keep-awake`, `always-background`, and `prefill` load from
+Add entries to the top-level `"plugins"` array. `subagent-abort`,
+`subagent-sidebar-tree`, and `subagent-status` are referenced **directly from
+this checkout** (path-based, no copy step). `keep-awake`, `always-background`,
+and `prefill` load from
 `~/.config/opencode/plugins/<name>/`, which must contain a **copy** (never a
 symlink) of the repo folder.
 
@@ -35,6 +37,7 @@ symlink) of the repo folder.
     { "package": "%USERPROFILE%\\.config\\opencode\\plugins\\prefill",
       "options": { "mode": "think-reply-continue", "thinkingSeed": "I should answer...",
                    "seed": "I will give my answer:", "userSeed": "Continue" } },
+    { "package": "<repo-root>\\subagent-abort" },
     { "package": "<repo-root>\\subagent-status" },
     { "package": "<repo-root>\\subagent-sidebar-tree" }
   ]
@@ -54,8 +57,9 @@ Run from this repo root to copy a plugin into its live dir (repeat per plugin):
 Copy-Item -Recurse -Force .\keep-awake\* "$env:USERPROFILE\.config\opencode\plugins\keep-awake\"
 ```
 
-The directly-referenced plugins (`subagent-sidebar-tree`, `subagent-status`)
-need no copy — editing the checkout is enough after OpenCode reloads.
+The directly-referenced plugins (`subagent-abort`, `subagent-sidebar-tree`,
+`subagent-status`) need no copy — editing the checkout is enough after OpenCode
+reloads.
 
 ### 3. Install the agent
 
@@ -88,9 +92,14 @@ From `subagent-sidebar-tree/` (the `.mjs` suites are portable):
 
 ```bash
 node --experimental-strip-types test/subagent-sidebar-tree.test.mjs
-node --experimental-strip-types test/subagent-abort.test.mjs
 node --experimental-strip-types test/subagent-server-safe.test.mjs
 node test/tui-jsx-sanity.mjs tui.tsx
+```
+
+`subagent-abort` has its own portable suite. From `subagent-abort/`:
+
+```bash
+node --experimental-strip-types test/subagent-abort.test.mjs
 ```
 
 The bun harness runners copy sources into a temp dir, link OpenTUI
@@ -113,7 +122,8 @@ node keep-awake/test/keep-awake.test.mjs
 
 ### 6. Behavior notes
 
-- `subagent-sidebar-tree` adapts to the host: a right-pane panel on stock v2.0.22, the 42-col core sidebar on a patched/ungated build. It also registers `abort_subagent` to stop a caller's own descendant sessions.
+- `subagent-sidebar-tree` adapts to the host: a right-pane panel on stock v2.0.22, the 42-col core sidebar on a patched/ungated build.
+- `subagent-abort` registers the `abort_subagent` tool, which interrupts the caller's own descendant subagent sessions (one by `sessionID`, or all with `all: true`) and returns the aborted sessionIDs.
 - `subagent-status` defaults to `summary` mode (state + a 2-4 sentence LLM summary). Pass `mode: "state"` for a cheap status check (`running`/`idle`/`waiting`/`finished`) with no LLM call.
 - `always-background` forces `background: true` on every tool call except those in its `exclude` list (default `["shell", "subagent"]`, which keep their own user-controlled `background` input).
 - `keep-awake` keeps the machine awake but lets the display sleep (`keepDisplayOn`/`mode: "display"` to keep it on).
