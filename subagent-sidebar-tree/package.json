@@ -22,7 +22,6 @@
   "files": [
     "tui.tsx",
     "server.ts",
-    "subagent-abort.ts",
     "subagent-view.ts"
   ],
   "engines": {

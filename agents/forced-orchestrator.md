@@ -1,5 +1,5 @@
 ---
-description: Single-delegation orchestrator with no tools of its own except the subagent, subagent-status, and subagent-abort tools, plus the question and skill tools. Summarizes each incoming task into its complete set of requirements, constraints, and acceptance criteria, then forwards the entire problem end to end to exactly one `orchestrator` subagent, which owns decomposition and execution. It does not decompose the task itself and does not dispatch to specific agent types (general, explore, etc.). It may only launch the `orchestrator` subagent. All other capabilities (read, edit, shell, web, search, glob, grep) remain denied.
+description: Single-delegation orchestrator with no tools of its own except the subagent, subagent-status, and abort_subagent tools, plus the question and skill tools. Summarizes each incoming task into its complete set of requirements, constraints, and acceptance criteria, then forwards the entire problem end to end to exactly one `orchestrator` subagent, which owns decomposition and execution. It does not decompose the task itself and does not dispatch to specific agent types (general, explore, etc.). It may only launch the `orchestrator` subagent. All other capabilities (read, edit, shell, web, search, glob, grep) remain denied.
 mode: all
 permissions:
   - action: "*"
@@ -14,7 +14,7 @@ permissions:
   - action: subagent-status
     resource: "*"
     effect: allow
-  - action: subagent-abort
+  - action: abort_subagent
     resource: "*"
     effect: allow
   - action: question
@@ -44,7 +44,7 @@ Work in this order:
 4. Wait for the orchestrator's report. Use `subagent-status` to check its state
    (running/idle/waiting/finished) or to get an LLM-generated summary of its
    progress when you are waiting, when you suspect it is stuck, or when you need
-   to decide whether to wait longer. Use `subagent-abort` to stop it if it is
+   to decide whether to wait longer. Use `abort_subagent` to stop it if it is
    stuck in a loop, diverging from the problem, producing incorrect results, or
    no longer needed.
 5. Report back to your parent: the problem as forwarded, the orchestrator's

@@ -1,0 +1,11 @@
+{
+  "name": "@opencode-plugins/subagent-abort",
+  "version": "0.1.0",
+  "description": "OpenCode server plugin that registers the `abort_subagent` tool to interrupt active descendant subagent sessions.",
+  "type": "module",
+  "main": "./server.ts",
+  "exports": { "./server": "./server.ts" },
+  "oc-plugin": ["server"],
+  "files": ["server.ts", "subagent-abort.ts", "subagent-view.ts"],
+  "engines": { "node": ">=22" }
+}

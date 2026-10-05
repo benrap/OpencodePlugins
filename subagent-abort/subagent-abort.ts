@@ -237,7 +237,7 @@ export function noteEvent(registry: AbortRegistry, event: unknown): void {
   }
 }
 
-const REGISTRY_KEY = Symbol.for("opencode.subagent-sidebar-tree.abort-registry.v1")
+const REGISTRY_KEY = Symbol.for("opencode.subagent-abort.registry.v1")
 
 /** Process-wide registry; survives the host re-evaluating the plugin module. */
 export function globalRegistry(): AbortRegistry {
