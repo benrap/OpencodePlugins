@@ -85,10 +85,11 @@ const INPUT_SCHEMA = {
     mode: {
       type: 'string',
       enum: ['state', 'summary'],
-      default: 'summary',
+      default: 'state',
       description:
-        '"state" returns only the session state (running/idle/waiting/finished) ' +
-        'without an LLM call. "summary" also generates an LLM summary.',
+        '"state" (default) returns only the session state ' +
+        '(running/idle/waiting/finished) without an LLM call. "summary" also ' +
+        'generates an LLM summary.',
     },
   },
   required: ['sessionID'],
@@ -488,7 +489,7 @@ function makeTool(ctx) {
     execute: async (input) => {
       const args = input && typeof input === 'object' ? input : {};
       const sessionID = typeof args.sessionID === 'string' ? args.sessionID.trim() : '';
-      const mode = args.mode === 'state' ? 'state' : 'summary';
+      const mode = args.mode === 'summary' ? 'summary' : 'state';
 
       if (!sessionID) {
         const message = 'subagent-status: `sessionID` is required.';

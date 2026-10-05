@@ -9,12 +9,12 @@ transcript into its own context.
 The tool reads the target session's recent conversation and returns a summary.
 It supports two modes:
 
-- **`state`** — Returns only the session state (`running`, `idle`, `waiting`,
-  or `finished`) without making an LLM call. This is a lightweight status
-  check.
-- **`summary`** (default) — Returns the state AND an LLM-generated 2-4
-  sentence summary of what the subagent is doing, its status, key findings,
-  blockers, and the likely next step.
+- **`state`** (default) — Returns only the session state (`running`, `idle`,
+  `waiting`, or `finished`) without making an LLM call. This is a lightweight
+  status check.
+- **`summary`** — Returns the state AND an LLM-generated 2-4 sentence summary
+  of what the subagent is doing, its status, key findings, blockers, and the
+  likely next step.
 
 ## Usage
 
@@ -34,7 +34,7 @@ const { output } = await tools.subagent-status.summary({ sessionID: "ses_xxx" })
 | Parameter  | Type     | Default     | Description                                                                 |
 | ---------- | -------- | ----------- | --------------------------------------------------------------------------- |
 | `sessionID` | `string` | (required)  | Session id of the subagent to check.                                        |
-| `mode`     | `string` | `"summary"` | `"state"` for a lightweight status check, `"summary"` for the full summary. |
+| `mode`     | `string` | `"state"`   | `"state"` for a lightweight status check, `"summary"` for the full summary. |
 | `limit`    | `integer` | `20`        | How many recent messages to read (max 200).                                 |
 | `model`    | `string` | —           | Optional model override as `"providerID/modelID"`.                         |
 
