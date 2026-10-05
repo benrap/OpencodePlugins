@@ -1,68 +1,78 @@
 /**
  * prefill — OpenCode V2 plugin (globally installed)
  *
- * Per-message opt-in message injection: when the user ends a message with the
- * marker `#prefill`, the plugin injects extra messages into the outgoing model
- * request (assistant prefill / conversation steering). The marker is a control
- * channel: it is stripped from the user's message at admission so the model
- * never sees it and it never appears in the persisted transcript.
+ * Per-message opt-in message injection driven by a literal separator marker.
+ * A message may embed the case-sensitive marker `#prefill` once or twice to
+ * split the input into parts; the first part is persisted as the user's message
+ * and the remaining parts are appended to the outgoing model request as an
+ * alternating assistant/user exchange (conversation steering / prefill).
  *
- * Prefill is OFF by default. No marker ⇒ no injection.
+ *   message1 #prefill message2 #prefill message3
+ *     => parts [message1, message2, message3]
+ *     => persisted user message: "message1"
+ *     => request gains: assistant "message2", then user "message3"
+ *     => model sees [user: message1, assistant: message2, user: message3]
+ *
+ * No marker => nothing happens. Prefill is OFF by default in that sense: it is
+ * strictly opt-in per message.
  *
  * Dependency-free plain-object plugin: `export default { id, setup }`.
  *
  * HOW IT WORKS
  *   1. `ctx.session.hook("prompt", (event) => ...)` intercepts the user's
  *      message at admission. `event.prompt.text` is mutable and "edits become
- *      the canonical persisted user input". If the text ends with `#prefill`
- *      (tolerating trailing whitespace/newlines) the marker is removed and a
- *      per-session "prefill armed for this turn" flag is set. If the marker is
- *      absent the flag is cleared, so it resets on every new message.
+ *      the canonical persisted user input". If the text contains `#prefill` it
+ *      is split on that literal separator; the mutable text is rewritten to the
+ *      FIRST non-empty part and the remaining parts are stashed per session. If
+ *      the marker is absent the session is disarmed, so state resets on every
+ *      new message.
  *   2. `ctx.session.hook("context", (event) => ...)` runs immediately before
  *      model dispatch, before protocol lowering. When the session is armed it
- *      appends messages to `event.messages` in place. The `context` hook fires
- *      per model call (including tool round-trips); the armed flag persists for
- *      the whole turn and is cleared by the next prompt admission.
+ *      appends the stashed parts to `event.messages` in order as alternating
+ *      assistant/user messages. The `context` hook fires per model call
+ *      (including tool round-trips); a per-turn `injected` flag ensures we only
+ *      inject once, and it is reset by the next prompt admission.
  *
- * MARKER RULES (decided + documented)
- *   - Matching is CASE-SENSITIVE: only the exact lowercase `#prefill`.
- *     Rationale: it is a deliberate control channel; case-insensitive matching
- *     would make accidental triggers (e.g. prose, code) more likely.
- *   - The marker must be at the END of the message, optionally followed only by
- *     whitespace/newlines (`/#prefill\s*$/`). `#prefill` mid-message never
- *     triggers.
- *   - A message that is ONLY the marker (or whitespace + marker) is NOT
- *     stripped and does NOT arm: stripping would leave an empty user message,
- *     which is an invalid/degenerate turn. The marker is left in place and the
- *     turn is treated as ordinary text. (Documented edge case.)
- *   - The marker is removed together with any whitespace it leaves at the end,
- *     e.g. `"do the thing #prefill\n"` ⇒ `"do the thing"`.
+ * ROLE / SEPARATOR RULES (decided + documented)
+ *   - The separator is the literal, CASE-SENSITIVE string `#prefill`. Split on
+ *     it, trim each part, and drop empties:
+ *       text.split('#prefill').map(s => s.trim()).filter(s => s.length > 0)
+ *   - Roles alternate starting with the user:
+ *       p1=user (persisted), p2=assistant, p3=user, p4=assistant, ...
+ *   - The FIRST part is the persisted user message; everything from the first
+ *     marker onward is stripped from the persisted transcript.
+ *   - The remaining parts (p2..pn) are REQUEST-ONLY: they are appended to the
+ *     model request via the `context` hook and are NOT persisted. This is the
+ *     accepted trade-off of using a single user message as the carrier.
+ *   - The request must end on a user-role part so the model replies. If the
+ *     remaining parts end on an assistant part (an odd number of remaining
+ *     parts, i.e. an even total number of parts), a trailing user nudge is
+ *     appended (`trailingNudge`, default "Continue").
+ *   - A message with NO marker is a clean no-op: no rewrite, no injection.
+ *   - A message that is ONLY the marker(s) (e.g. `#prefill` or
+ *     `#prefill #prefill`, optionally surrounded by whitespace) is a no-op: the
+ *     text is left untouched and the session is not armed.
+ *   - A trailing marker with a single non-empty part (e.g. `message1 #prefill`)
+ *     persists `message1` but injects nothing (there is nothing to inject).
  *   - Idempotency: admission is not an exactly-once boundary (concurrent
- *     submissions may run the hook more than once; only the first successful
- *     admission wins). Re-admission of the already-stripped text is recognised
- *     by comparing against the stored canonical text, so a repeat run does not
- *     clear the armed flag.
- *
- * MODES (config `mode`)
- *   "assistant-prefill" — append ONE assistant message containing `seed`.
- *   "steer-pair"        — append an assistant message (seed) THEN a user message
- *                         (userSeed), i.e. a fabricated two-message exchange.
+ *     submissions may run the hook more than once). Re-admission of the
+ *     already-rewritten text (which has no marker) is recognised by comparing
+ *     against the stored canonical text, so a repeat run does not clear the
+ *     armed/injectable state.
  *
  * CONFIG (ctx.options, all optional — zero config works):
  *   {
- *     "enabled":     true,               // master switch
- *     "mode":        "assistant-prefill",// or "steer-pair"
- *     "seed":        "<assistant text>", // THE one value you change to try things
- *     "userSeed":    "<user text>",      // steer-pair only
- *     "debug":       false,              // append a trace to the debug file
- *     "captureHttp": false               // capture the raw outgoing request body
+ *     "enabled":       true,        // master switch
+ *     "trailingNudge": "Continue",  // user turn appended when the parts end on assistant
+ *     "debug":         false,       // append a trace to the debug file
+ *     "captureHttp":   false        // capture the raw outgoing request body
  *   }
  *
  * ENV OVERRIDES (handy for `opencode run` experiments):
- *   PREFILL_SEED, PREFILL_MODE, PREFILL_USER_SEED, PREFILL_DISABLED=1,
- *   PREFILL_DEBUG=1, PREFILL_CAPTURE_HTTP=1, PREFILL_DEBUG_FILE=<path>.
- *   Back-compat: the lab names PREFILL_LAB_SEED / _MODE / _USER_SEED /
- *   _DISABLED / _CAPTURE_HTTP / _DEBUG_FILE are also accepted.
+ *   PREFILL_TRAILING_NUDGE, PREFILL_DISABLED=1, PREFILL_DEBUG=1,
+ *   PREFILL_CAPTURE_HTTP=1, PREFILL_DEBUG_FILE=<path>.
+ *   Back-compat: the lab names PREFILL_LAB_DISABLED, PREFILL_LAB_DEBUG_FILE and
+ *   PREFILL_LAB_CAPTURE_HTTP are also accepted.
  *
  * DEBUG LOGGING (default OFF):
  *   Enabled when env PREFILL_DEBUG_FILE points at a file, when options.debug is
@@ -76,6 +86,9 @@
  *   - We mutate the event in place; returned replacements are ignored.
  *   - Everything is wrapped in try/catch so a plugin error can never break
  *     startup or a model turn. Missing hooks are a clean no-op.
+ *   - Per-session state lives on globalThis keyed by
+ *     Symbol.for('opencode.prefill.state.v1') because the module may be
+ *     re-evaluated per reconciliation.
  */
 
 import fs from 'node:fs';
@@ -86,20 +99,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TAG = '[prefill]';
 const SENTINEL = path.join(__dirname, 'prefill.debug');
 
-/**
- * Trailing marker, case-sensitive, tolerating trailing whitespace/newlines.
- * `$` (no `m` flag) is end-of-input, so the marker must be at the very end.
- */
-const MARKER_RE = /#prefill\s*$/;
+/** The literal, case-sensitive separator marker. */
+const MARKER = '#prefill';
 
 const DEFAULTS = {
   enabled: true,
-  mode: 'assistant-prefill',
-  // PLACEHOLDER DEFAULT — the real wording is still to come from the user.
-  // Keep the seed natural: text that self-identifies as an "injected directive"
-  // makes alignment-trained models flag it and refuse instead of continuing.
-  seed: '[PREFILL PLACEHOLDER — set options.seed or PREFILL_SEED] Understood — I will continue the conversation naturally from here.',
-  userSeed: '[PREFILL PLACEHOLDER — set options.userSeed or PREFILL_USER_SEED] Please continue.',
+  trailingNudge: 'Continue',
   debug: false,
   captureHttp: false,
 };
@@ -120,7 +125,8 @@ function getState() {
       // rather than closing over a setup-time snapshot, so a hook registration
       // that survives a reconciliation cannot keep using stale options.
       cfg: null,
-      sessions: new Map(), // sessionID -> { armed: boolean, canonical: string|null }
+      // sessionID -> { armed, parts, canonical, injected }
+      sessions: new Map(),
       prompts: 0,
       injections: 0,
     };
@@ -133,10 +139,21 @@ function sessionState(S, sessionID) {
   const key = sessionID || 'unknown';
   let st = S.sessions.get(key);
   if (!st) {
-    st = { armed: false, canonical: null };
+    st = newSessionState();
     S.sessions.set(key, st);
   }
   return st;
+}
+
+function newSessionState() {
+  return { armed: false, parts: [], canonical: null, injected: false };
+}
+
+function resetSessionState(st) {
+  st.armed = false;
+  st.parts = [];
+  st.canonical = null;
+  st.injected = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +253,16 @@ function sessionIdOf(event) {
   return 'unknown';
 }
 
+/** Split admitted text on the literal marker; trim parts and drop empties. */
+function splitParts(text) {
+  return String(text)
+    .split(MARKER)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 // ---------------------------------------------------------------------------
-// prompt hook — opt-in detection + marker stripping
+// prompt hook — marker detection + part extraction + persisted rewrite
 // ---------------------------------------------------------------------------
 
 /**
@@ -270,53 +295,63 @@ function onPrompt(cfg, S, event) {
   const original = holder.text;
   S.prompts++;
 
-  const m = MARKER_RE.exec(original);
-  if (m) {
-    const stripped = original.slice(0, m.index).replace(/\s+$/, '');
-    if (!stripped.trim()) {
-      // Marker-only message: stripping would empty it. Leave the text as-is and
-      // do not arm (documented edge case).
-      const st = sessionState(S, sessionID);
-      st.armed = false;
-      st.canonical = null;
-      dbg(cfg, `prompt: marker-only message (len=${original.length}); not stripping, not arming session=${sessionID}`);
+  const hasMarker = typeof original === 'string' && original.includes(MARKER);
+  const st = sessionState(S, sessionID);
+
+  // No marker: a clean no-op for a fresh message. The one exception is
+  // idempotent re-admission of the text we just rewrote (which has no marker):
+  // keep the armed/injectable state instead of clearing it.
+  if (!hasMarker) {
+    if (st.armed && st.canonical != null && original === st.canonical) {
+      dbg(cfg, `prompt: re-admission of already-rewritten text; keeping ARMED session=${sessionID}`);
       return;
     }
-    holder.text = stripped;
-    const st = sessionState(S, sessionID);
-    st.armed = true;
-    st.canonical = stripped;
+    resetSessionState(st);
+    dbg(cfg, `prompt: no marker; disarmed session=${sessionID}`);
+    return;
+  }
+
+  const parts = splitParts(original);
+
+  // Marker-only message (e.g. "#prefill", "#prefill #prefill", whitespace
+  // only): stripping would leave an empty persisted message, which is invalid.
+  // Leave the text untouched and reset state (documented edge case).
+  if (parts.length === 0) {
+    resetSessionState(st);
     dbg(
       cfg,
-      `prompt: marker found; stripped len ${original.length}->${stripped.length}; ARMED session=${sessionID} canonical=${JSON.stringify(
-        stripped,
-      )}`,
+      `prompt: marker-only message (len=${original.length}); not rewriting, not arming session=${sessionID}`,
     );
     return;
   }
 
-  // No marker. Idempotency: if this is a re-admission of the text we just
-  // stripped, keep the flag as it was (do not disarm).
-  const st = sessionState(S, sessionID);
-  if (st.armed && st.canonical != null && original === st.canonical) {
-    dbg(cfg, `prompt: re-admission of already-stripped text; keeping ARMED session=${sessionID}`);
-    return;
-  }
+  const persisted = parts[0];
+  const rest = parts.slice(1);
 
-  st.armed = false;
-  st.canonical = null;
-  dbg(cfg, `prompt: no marker; disarmed session=${sessionID}`);
+  // Rewrite the mutable persisted text: strip the markers and everything after
+  // the first one. The remaining parts are request-only.
+  holder.text = persisted;
+  st.canonical = persisted;
+  st.parts = rest;
+  st.armed = rest.length > 0; // only arm when there is something to inject
+  st.injected = false; // new admitted turn: allow injection again
+
+  dbg(
+    cfg,
+    `prompt: marker found; parts=${parts.length} rest=${rest.length}; persisted len ${original.length}->${persisted.length}; ` +
+      `${st.armed ? 'ARMED' : 'not-armed (nothing to inject)'} session=${sessionID} canonical=${JSON.stringify(persisted)}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
-// context hook — injection
+// context hook — request-only injection
 // ---------------------------------------------------------------------------
 
-function applyInjection(cfg, S, event) {
+function applyInjection(cfg, S, event, st) {
   const messages = event && event.messages;
   if (!Array.isArray(messages)) {
     dbg(cfg, 'context: event.messages is not an array; no-op');
-    return;
+    return false;
   }
 
   if (cfg.debug) {
@@ -328,86 +363,37 @@ function applyInjection(cfg, S, event) {
     });
   }
 
-  const last = messages[messages.length - 1];
-  const lastRole = roleOf(last);
-  const lastText = contentToText(last && last.content).trim();
-
-  const seed = String(cfg.seed ?? '');
-  const userSeed = String(cfg.userSeed ?? '');
-  const thinkingSeed = String(cfg.thinkingSeed ?? '');
-
-  // Double-injection guard: if the trailing message is already ours, do nothing.
-  if (lastRole === 'assistant' && lastText === seed.trim()) {
-    dbg(cfg, 'skip: trailing assistant message is already the injected seed');
-    return;
-  }
-  if (
-    lastRole === 'user' &&
-    (cfg.mode === 'steer-pair' ||
-      cfg.mode === 'reasoning-continue' ||
-      cfg.mode === 'think-reply-continue') &&
-    lastText === userSeed.trim()
-  ) {
-    dbg(cfg, 'skip: trailing user message is already the injected steer message');
-    return;
+  const rest = Array.isArray(st.parts) ? st.parts.slice() : [];
+  if (rest.length === 0) {
+    dbg(cfg, 'context: armed but no parts to inject; no-op');
+    return false;
   }
 
-  // Only inject when the last message is a user turn. This also means tool
-  // round-trips (trailing role "tool") never re-inject within a turn.
-  if (lastRole !== 'user') {
-    dbg(cfg, `skip: trailing role is ${JSON.stringify(lastRole)}, not "user"`);
-    return;
-  }
+  const sample = messages.length > 0 ? messages[messages.length - 1] : null;
 
-  if (!seed.trim()) {
-    dbg(cfg, 'skip: seed is empty (OpenAIChat would drop an empty assistant turn)');
-    return;
-  }
-
-  const sample = messages[messages.length - 1];
-  const useParts = Array.isArray(sample && sample.content);
-
-  // --- which parts does this mode inject? ---------------------------------
-  // OpenAIChat.lowerAssistantMessage lowers `reasoning` parts into the model's
-  // `compatibility.reasoningField` (e.g. `reasoning_content`) and `text` parts
-  // into `content`. Verified at the wire level. So ONE assistant message can
-  // carry BOTH: reasoning is invisible to the reply, text is the reply prefix.
-  const THINK_REPLY = 'think-reply-continue';
-  const modesWithUserTurn =
-    cfg.mode === 'steer-pair' || cfg.mode === 'reasoning-continue' || cfg.mode === THINK_REPLY;
-  const asReasoning =
-    cfg.mode === 'reasoning' || cfg.mode === 'reasoning-continue' || cfg.mode === THINK_REPLY;
-
-  const injected = [];
-  if (cfg.mode === THINK_REPLY) {
-    if (thinkingSeed) injected.push({ type: 'reasoning', text: thinkingSeed });
-    if (seed) injected.push({ type: 'text', text: seed });
-  } else if (asReasoning) {
-    injected.push({ type: 'reasoning', text: seed });
-  } else {
-    injected.push({ type: 'text', text: seed });
-  }
-
-  messages.push({
-    role: 'assistant',
-    content: useParts ? injected : injected.map((p) => p.text).join(''),
+  // p2 = assistant, p3 = user, p4 = assistant, ... (index 0 is p2).
+  rest.forEach((text, i) => {
+    const role = i % 2 === 0 ? 'assistant' : 'user';
+    messages.push(makeMessage(role, text, sample));
+    dbg(cfg, `INJECTED ${role} message len=${text.length} :: ${JSON.stringify(text)}`);
   });
-  S.injections++;
-  dbg(
-    cfg,
-    `INJECTED assistant message (mode=${cfg.mode}) parts=[${injected
-      .map((p) => p.type)
-      .join(',')}] thinkingLen=${thinkingSeed.length} textLen=${seed.length}`,
-  );
 
-  // Trailing user turn. An injected ASSISTANT turn leaves the array ending on an
-  // assistant message, which the model can treat as "I have already finished"
-  // and answer with end-of-sequence. A user turn gives it something to respond
-  // to, and makes the array end on `user` (which every provider accepts).
-  if (modesWithUserTurn && userSeed.trim()) {
-    messages.push(makeMessage('user', userSeed, sample));
-    dbg(cfg, `INJECTED user message len=${userSeed.length}`);
+  // The request must end on a user-role part so the model replies. If the last
+  // injected part is an assistant part, append a trailing user nudge.
+  const lastInjectedRole = (rest.length - 1) % 2 === 0 ? 'assistant' : 'user';
+  if (lastInjectedRole !== 'user') {
+    const nudge = String(cfg.trailingNudge ?? '').trim();
+    if (nudge) {
+      messages.push(makeMessage('user', cfg.trailingNudge, sample));
+      dbg(cfg, `INJECTED trailing user nudge len=${cfg.trailingNudge.length}`);
+    } else {
+      dbg(cfg, 'WARNING: parts end on assistant and trailingNudge is empty; request may not elicit a reply');
+    }
   }
+
+  S.injections++;
+  dbg(cfg, `context: injection complete (${rest.length} part(s)) session armed -> ${S.injections} total`);
+  return true;
 }
 
 function onContext(cfg, S, event) {
@@ -417,8 +403,15 @@ function onContext(cfg, S, event) {
     dbg(cfg, `context: session=${sessionID} not armed; no injection`);
     return;
   }
+  // Double-injection guard: the context hook can fire multiple times per turn
+  // (including tool round-trips). Inject only once per admitted turn.
+  if (st.injected) {
+    dbg(cfg, `context: session=${sessionID} already injected this turn; skipping`);
+    return;
+  }
   dbg(cfg, `context: session=${sessionID} ARMED; injecting`);
-  applyInjection(cfg, S, event);
+  const didInject = applyInjection(cfg, S, event, st);
+  if (didInject) st.injected = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,8 +473,6 @@ function readConfig(ctx) {
   const debugFile = envDebugFile || (sentinelExists ? SENTINEL : null);
   const debug = options.debug === true || env.PREFILL_DEBUG === '1' || debugFile != null;
 
-  const modeRaw = firstString(options.mode, env.PREFILL_MODE, env.PREFILL_LAB_MODE);
-
   let captureSeq = 0;
   const captureDir = firstString(env.PREFILL_CAPTURE_DIR) || (debugFile ? path.dirname(debugFile) : __dirname);
 
@@ -490,23 +481,11 @@ function readConfig(ctx) {
       options.enabled !== false &&
       env.PREFILL_DISABLED !== '1' &&
       env.PREFILL_LAB_DISABLED !== '1',
-    mode:
-      modeRaw === 'steer-pair'
-        ? 'steer-pair'
-        : modeRaw === 'reasoning'
-          ? 'reasoning'
-          : modeRaw === 'reasoning-continue'
-            ? 'reasoning-continue'
-            : modeRaw === 'think-reply-continue'
-              ? 'think-reply-continue'
-              : 'assistant-prefill',
-    seed: firstString(options.seed, env.PREFILL_SEED, env.PREFILL_LAB_SEED) || DEFAULTS.seed,
-    userSeed:
-      firstString(options.userSeed, env.PREFILL_USER_SEED, env.PREFILL_LAB_USER_SEED) ||
-      DEFAULTS.userSeed,
+    trailingNudge:
+      firstString(options.trailingNudge, env.PREFILL_TRAILING_NUDGE) || DEFAULTS.trailingNudge,
     debug,
     debugFile,
-    captureHttp: options.captureHttp === true || env.PREFILL_CAPTURE_HTTP === '1',
+    captureHttp: options.captureHttp === true || env.PREFILL_CAPTURE_HTTP === '1' || env.PREFILL_LAB_CAPTURE_HTTP === '1',
     captureFile(text) {
       captureSeq += 1;
       const file = path.join(captureDir, `prefill-request-${captureSeq}.json`);
@@ -532,16 +511,15 @@ async function setup(ctx) {
     // time (see the hook registrations below). V2 re-runs setup() on
     // reconciliation but does not necessarily dispose prior hook registrations,
     // so a hook closing over a setup-time snapshot would keep using STALE
-    // options -- which is exactly how `mode: "reasoning"` silently failed to
-    // take effect in a running service.
+    // options.
     S.cfg = readConfig(ctx);
     const cfg = S.cfg;
 
     dbg(
       cfg,
-      `SETUP pid=${process.pid} refs=${S.setupRefs} mode=${cfg.mode} enabled=${cfg.enabled} captureHttp=${cfg.captureHttp} options=${JSON.stringify(
-        (ctx && ctx.options) || {},
-      )}`,
+      `SETUP pid=${process.pid} refs=${S.setupRefs} enabled=${cfg.enabled} trailingNudge=${JSON.stringify(
+        cfg.trailingNudge,
+      )} captureHttp=${cfg.captureHttp} options=${JSON.stringify((ctx && ctx.options) || {})}`,
     );
 
     if (!cfg.enabled) {
@@ -555,7 +533,7 @@ async function setup(ctx) {
       return; // no dispose
     }
 
-    // Register the `prompt` hook (opt-in detection + marker stripping).
+    // Register the `prompt` hook (marker detection + persisted rewrite).
     // Re-registered on EVERY setup() — no register-once guard.
     try {
       await ctx.session.hook('prompt', (event) => {
@@ -574,7 +552,8 @@ async function setup(ctx) {
       dbg(cfg, `failed to register prompt hook: ${err && err.message ? err.message : err}`);
     }
 
-    // Register the `context` hook (injection). Re-registered on EVERY setup().
+    // Register the `context` hook (request-only injection). Re-registered on
+    // EVERY setup().
     try {
       await ctx.session.hook('context', (event) => {
         // Read the LIVE config, not the setup-time snapshot.
