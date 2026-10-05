@@ -55,4 +55,4 @@ Write-Host $verifyPath
 Write-Host ""
 Write-Host "Please open a NEW cmd or PowerShell window for the change to take effect." -ForegroundColor Cyan
 Write-Host "In the new window, run: opencode --version"
-Write-Host "You should see: opencode vlocal"
+Write-Host "You should see: opencode v2.0.23-patched"

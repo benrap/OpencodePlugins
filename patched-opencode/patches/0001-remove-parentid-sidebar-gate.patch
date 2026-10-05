@@ -1,3 +1,6 @@
+# 0001: remove the parentID sidebar gate (packages/tui/src/component/session-frame.tsx).
+# Lets subagent sessions render their sidebar. Regenerated against opencode v2.0.23
+# (0fd7e2829449b052abf0078666669302923d77af).
 diff --git a/packages/tui/src/component/session-frame.tsx b/packages/tui/src/component/session-frame.tsx
 index ef267d8ed6..4044a0e3f6 100644
 --- a/packages/tui/src/component/session-frame.tsx

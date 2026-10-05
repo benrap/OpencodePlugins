@@ -1,3 +1,80 @@
+# 0002: session "waiting" status + completion-tick fix.
+# End-to-end waiting status (schema/client/core/app/tui) plus suppression of the completion tick
+# while background work is outstanding. Excludes session-frame.tsx (see 0001).
+# Regenerated against opencode v2.0.23 (0fd7e2829449b052abf0078666669302923d77af).
+diff --git a/packages/app/src/composer/submit.test.ts b/packages/app/src/composer/submit.test.ts
+index 9c98efbc7c..ace9836124 100644
+--- a/packages/app/src/composer/submit.test.ts
++++ b/packages/app/src/composer/submit.test.ts
+@@ -99,7 +99,7 @@ function session(input: {
+   calls: string[]
+   prompt?: (value: Parameters<ComposerSession["data"]["session"]["prompt"]>[0]) => Promise<void>
+   handoff?: ComposerSession["handoff"]
+-  statuses?: ("idle" | "running")[]
++  statuses?: ("idle" | "running" | "waiting")[]
+   current?: ComposerSession["current"]
+   admitted?: (messageID: string) => boolean
+   shell?: ComposerSession["api"]["shell"]
+@@ -324,7 +324,7 @@ describe("Composer submission", () => {
+     state.set(prompt)
+     state.context.add({ type: "file", path: "notes.md", description: "the failing version" })
+     const attempts: string[] = []
+-    const statuses: ("idle" | "running")[] = []
++    const statuses: ("idle" | "running" | "waiting")[] = []
+     const first = Promise.withResolvers<void>()
+     const second = Promise.withResolvers<void>()
+ 
+diff --git a/packages/app/src/session/model.ts b/packages/app/src/session/model.ts
+index ec000daf68..bff35b3787 100644
+--- a/packages/app/src/session/model.ts
++++ b/packages/app/src/session/model.ts
+@@ -58,8 +58,10 @@ export function useSessionModel() {
+ 
+   const status = createMemo(() => {
+     const id = sessionID()
+-
+-    return id && data.session.status(id) === "running" ? { type: "busy" as const } : idle
++    const value = id ? data.session.status(id) : undefined
++    if (value === "running") return { type: "busy" as const }
++    if (value === "waiting") return { type: "waiting" as const }
++    return idle
+   })
+ 
+   const messages = createMemo(() => {
+diff --git a/packages/app/src/session/requests/background.ts b/packages/app/src/session/requests/background.ts
+index 2bb969cba1..3243713bde 100644
+--- a/packages/app/src/session/requests/background.ts
++++ b/packages/app/src/session/requests/background.ts
+@@ -9,7 +9,7 @@ export function createSessionBackground(input: {
+   sessionID: () => string | undefined
+   messages: (id: string) => SessionMessageInfo[]
+   sessions: () => SessionInfo[]
+-  status: (id: string) => "idle" | "running"
++  status: (id: string) => "idle" | "running" | "waiting"
+   shells: () => ShellInfo[]
+ }) {
+   const history = createMemo(() => {
+diff --git a/packages/app/src/shell/routes/session-ui-provider.tsx b/packages/app/src/shell/routes/session-ui-provider.tsx
+index d853e519f5..22e47a6482 100644
+--- a/packages/app/src/shell/routes/session-ui-provider.tsx
++++ b/packages/app/src/shell/routes/session-ui-provider.tsx
+@@ -62,10 +62,12 @@ export function SessionUIProvider(
+     session_status: Object.fromEntries(
+       data.session
+         .list()
+-        .map((session) => [
+-          session.id,
+-          data.session.status(session.id) === "running" ? ({ type: "busy" } as const) : ({ type: "idle" } as const),
+-        ]),
++        .map((session) => {
++          const status = data.session.status(session.id)
++          if (status === "running") return [session.id, { type: "busy" } as const]
++          if (status === "waiting") return [session.id, { type: "waiting" } as const]
++          return [session.id, { type: "idle" } as const]
++        }),
+     ),
+     session_diff: {},
+   }))
 diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
 index 62a6395c9d..f8b3cdd9a2 100644
 --- a/packages/client/src/promise/generated/types.ts
@@ -9,6 +86,132 @@ index 62a6395c9d..f8b3cdd9a2 100644
 +  | { type: "waiting" }
  
  export type PtyTicketConnectToken = { ticket: string; expires_in: number }
+ 
+diff --git a/packages/client/src/solid/data.ts b/packages/client/src/solid/data.ts
+index 4a1666f88b..123f00b77b 100644
+--- a/packages/client/src/solid/data.ts
++++ b/packages/client/src/solid/data.ts
+@@ -51,7 +51,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
+ import type { SessionInbox } from "@opencode/schema/session-inbox"
+ import { batch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+ 
+-export type DataSessionStatus = "idle" | "running"
++export type DataSessionStatus = "idle" | "running" | "waiting"
+ type OpenCodeEventMap = { [Type in OpenCodeEvent["type"]]: Extract<OpenCodeEvent, { type: Type }> }
+ 
+ export type CreateDataInput = {
+@@ -1006,6 +1006,9 @@ export function createData(config: CreateDataInput) {
+           assistant.retry = { attempt: event.data.attempt, at: event.data.at, error: event.data.error }
+         })
+         return
++      case "session.status":
++        if (event.data.status.type === "waiting") setSessionActive(event.data.sessionID, "waiting")
++        return
+       case "session.execution.started":
+         setSessionActive(event.data.sessionID, "running")
+         return
+diff --git a/packages/core/src/job.ts b/packages/core/src/job.ts
+index 771c5a7972..d1c5cae965 100644
+--- a/packages/core/src/job.ts
++++ b/packages/core/src/job.ts
+@@ -63,6 +63,7 @@ type Active = {
+ 
+ type State = {
+   jobs: SynchronizedRef.SynchronizedRef<Map<string, Active>>
++  deliveries: SynchronizedRef.SynchronizedRef<Map<SessionMessage.ID, Deferred.Deferred<void>>>
+   scope: Scope.Scope
+ }
+ 
+@@ -134,6 +135,9 @@ export interface Interface {
+   readonly cancel: (id: string) => Effect.Effect<Info | undefined>
+   readonly pendingBackground: Effect.Effect<readonly Background[]>
+   readonly completeBackground: (notificationID: SessionMessage.ID) => Effect.Effect<void>
++  readonly awaitBackground: (notificationID: SessionMessage.ID) => Effect.Effect<void>
++  readonly pendingFor: (sessionID: SessionSchema.ID) => Effect.Effect<readonly Background[]>
++  readonly awaiting: (sessionID: SessionSchema.ID) => Effect.Effect<boolean>
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Job") {}
+@@ -179,6 +183,7 @@ export const make = Effect.gen(function* () {
+   const kv = yield* KV.Service
+   const state: State = {
+     jobs: yield* SynchronizedRef.make(new Map()),
++    deliveries: yield* SynchronizedRef.make(new Map()),
+     scope: yield* Scope.Scope,
+   }
+ 
+@@ -449,10 +454,34 @@ export const make = Effect.gen(function* () {
+     return recovered
+   }).pipe(Effect.withSpan("Job.pendingBackground"))
+ 
++  /**
++   * Outstanding durable background work owned by a Session: shell work belongs to the
++   * Session that started it, subagent work belongs to the parent awaiting its child.
++   */
++  const pendingFor: Interface["pendingFor"] = Effect.fn("Job.pendingFor")(function* (sessionID) {
++    return (yield* pendingBackground).filter((background) =>
++      background.recovery.kind === "shell"
++        ? background.recovery.sessionID === sessionID
++        : background.recovery.parentSessionID === sessionID,
++    )
++  })
++
++  const awaiting: Interface["awaiting"] = Effect.fn("Job.awaiting")(function* (sessionID) {
++    return (yield* pendingFor(sessionID)).length > 0
++  })
++
+   const completeBackground: Interface["completeBackground"] = Effect.fn("Job.completeBackground")((notificationID) =>
+     SynchronizedRef.updateEffect(state.jobs, (jobs) =>
+       Effect.gen(function* () {
+         yield* kv.remove(`${backgroundPrefix}${notificationID}`)
++        const waiter = yield* SynchronizedRef.modify(state.deliveries, (waiters) => {
++          const deferred = waiters.get(notificationID)
++          if (!deferred) return [undefined, waiters] as const
++          const next = new Map(waiters)
++          next.delete(notificationID)
++          return [deferred, next] as const
++        })
++        if (waiter) yield* Deferred.succeed(waiter, undefined)
+         const entry = [...jobs].find(([, job]) => job.info.notificationID === notificationID)
+         if (!entry || entry[1].info.status === "running") return jobs
+         const next = new Map(jobs)
+@@ -462,6 +491,27 @@ export const make = Effect.gen(function* () {
+     ),
+   )
+ 
++  /**
++   * Resolves once a durable background notification has been admitted, which is
++   * when its marker clears. Waiting on the job itself only observes settlement;
++   * the wake-up notification is admitted asynchronously after that.
++   */
++  const awaitBackground: Interface["awaitBackground"] = Effect.fn("Job.awaitBackground")(function* (notificationID) {
++    const waiter = yield* SynchronizedRef.modifyEffect(
++      state.deliveries,
++      Effect.fnUntraced(function* (waiters) {
++        // Marker read and waiter registration are atomic here; completeBackground
++        // clears the marker before resolving, so no separate recheck is needed.
++        if (!(yield* kv.get(`${backgroundPrefix}${notificationID}`))) return [undefined, waiters] as const
++        const existing = waiters.get(notificationID)
++        if (existing) return [existing, waiters] as const
++        const deferred = Deferred.makeUnsafe<void>()
++        return [deferred, new Map(waiters).set(notificationID, deferred)] as const
++      }),
++    )
++    if (waiter) yield* Deferred.await(waiter)
++  })
++
+   return Service.of({
+     get,
+     start,
+@@ -472,6 +522,9 @@ export const make = Effect.gen(function* () {
+     cancel,
+     pendingBackground,
+     completeBackground,
++    awaitBackground,
++    pendingFor,
++    awaiting,
+   })
+ })
  
 diff --git a/packages/core/src/session/execution.ts b/packages/core/src/session/execution.ts
 index eeed241ae1..14f0240b86 100644
@@ -50,6 +253,145 @@ index eeed241ae1..14f0240b86 100644
                yield* bus.publish(
                  SessionEvent.Execution.Interrupted,
                  { sessionID, reason: outcome.reason },
+diff --git a/packages/core/src/session/execution/restart.ts b/packages/core/src/session/execution/restart.ts
+index dde3393018..c0c53f9c3f 100644
+--- a/packages/core/src/session/execution/restart.ts
++++ b/packages/core/src/session/execution/restart.ts
+@@ -171,16 +171,17 @@ export const layer = (options?: Options) =>
+           title: recovery.description,
+           notificationID: background.notificationID,
+           recovery,
+-          run: execution.resume(recovery.childSessionID).pipe(
+-            Effect.andThen(store.context(recovery.childSessionID)),
+-            Effect.map((messages) => {
+-              const assistant = messages.findLast(
+-                (message) =>
+-                  message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
+-              )
+-              return SubagentCompletion.text(assistant)
+-            }),
+-          ),
++          // Resume through the layer-provided execution, not the global Session
++          // service, so recovery drains via the same execution instance that
++          // owns this sweep.
++          run: SubagentCompletion.finalText({
++            sessions: {
++              resume: (sessionID) => execution.resume(sessionID),
++              messages: sessions.messages,
++            },
++            jobs,
++            sessionID: recovery.childSessionID,
++          }),
+         })
+         yield* jobs.background(background.id)
+         yield* jobs.wait({ id: background.id }).pipe(
+diff --git a/packages/core/src/session/subagent-completion.ts b/packages/core/src/session/subagent-completion.ts
+index 746bc5170e..b08f7217af 100644
+--- a/packages/core/src/session/subagent-completion.ts
++++ b/packages/core/src/session/subagent-completion.ts
+@@ -4,6 +4,7 @@ import { Effect } from "effect"
+ import type { Job } from "../job.js"
+ import type { Session } from "../session.js"
+ import type { SessionMessage } from "./message.js"
++import { SessionSchema } from "./schema.js"
+ 
+ export const NO_TEXT = "Subagent completed without a text response."
+ 
+@@ -17,6 +18,33 @@ export function text(message: SessionMessage.Info | undefined) {
+   )
+ }
+ 
++/**
++ * Runs the child session to quiescence and returns its final completed response.
++ * A child can end a turn while its own shell or nested subagent is still running;
++ * that work admits a wake-up notification and resumes the child, so the response
++ * is only final once no pending notification will wake it again.
++ */
++export const finalText = Effect.fnUntraced(function* (input: {
++  sessions: Pick<Session.Interface, "resume" | "messages">
++  jobs: Pick<Job.Interface, "pendingFor" | "awaitBackground">
++  sessionID: SessionSchema.ID
++}) {
++  while (true) {
++    yield* input.sessions.resume(input.sessionID)
++    const pending = yield* input.jobs.pendingFor(input.sessionID)
++    if (pending.length === 0) break
++    yield* Effect.forEach(pending, (job) => input.jobs.awaitBackground(job.notificationID), {
++      concurrency: "unbounded",
++      discard: true,
++    })
++  }
++  const messages = yield* input.sessions.messages({ sessionID: input.sessionID, order: "desc", limit: 20 })
++  const assistant = messages.find(
++    (message) => message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
++  )
++  return text(assistant)
++})
++
+ export const deliver = Effect.fnUntraced(function* (
+   sessions: Pick<Session.Interface, "synthetic">,
+   jobs: Pick<Job.Interface, "completeBackground">,
+diff --git a/packages/core/src/session/subagent-job.ts b/packages/core/src/session/subagent-job.ts
+index f8e7503fbd..5a21263269 100644
+--- a/packages/core/src/session/subagent-job.ts
++++ b/packages/core/src/session/subagent-job.ts
+@@ -41,15 +41,7 @@ export const make: Effect.Effect<Runner, never, Session.Service | Job.Service |
+         title: recovery.description,
+         metadata: {},
+         recovery,
+-        run: Effect.gen(function* () {
+-          yield* sessions.resume(recovery.childSessionID)
+-          const messages = yield* sessions.messages({ sessionID: recovery.childSessionID, order: "desc", limit: 20 })
+-          const assistant = messages.find(
+-            (message) =>
+-              message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
+-          )
+-          return SubagentCompletion.text(assistant)
+-        }),
++        run: SubagentCompletion.finalText({ sessions, jobs, sessionID: recovery.childSessionID }),
+       }),
+     background: Effect.fn("SubagentJob.background")(function* (recovery: Recovery) {
+       const info = yield* jobs.background(recovery.childSessionID)
+diff --git a/packages/core/test/job.test.ts b/packages/core/test/job.test.ts
+index 400a2adb4a..f767f7feb3 100644
+--- a/packages/core/test/job.test.ts
++++ b/packages/core/test/job.test.ts
+@@ -290,6 +290,35 @@ describe("Job", () => {
+     }),
+   )
+ 
++  it.live("waits for background acknowledgment before releasing an observer", () =>
++    Effect.gen(function* () {
++      const jobs = yield* Job.Service
++      const job = yield* jobs.start({
++        id: "shell_background_await",
++        type: "shell",
++        recovery: {
++          kind: "shell",
++          sessionID: SessionSchema.ID.make("ses_background_await"),
++          shellID: "shell_background_await",
++          command: "echo done",
++        },
++        run: Effect.succeed("done"),
++      })
++      const background = yield* jobs.background(job.id)
++      if (!background?.notificationID) return yield* Effect.die("background marker missing")
++
++      // Settlement alone must not release an observer; only acknowledgment does.
++      const waiting = yield* jobs
++        .awaitBackground(background.notificationID)
++        .pipe(Effect.forkIn(yield* Scope.Scope, { startImmediately: true }))
++      expect(yield* Fiber.await(waiting).pipe(Effect.timeoutOption("20 millis"))).toMatchObject({ _tag: "None" })
++
++      yield* jobs.completeBackground(background.notificationID)
++      yield* Fiber.join(waiting)
++      expect(yield* jobs.pendingBackground).toEqual([])
++    }),
++  )
++
+   it.live("persists backgroundAll ownership before releasing a blocked subagent", () =>
+     Effect.gen(function* () {
+       const jobs = yield* Job.Service
 diff --git a/packages/core/test/session-execution.test.ts b/packages/core/test/session-execution.test.ts
 index d6cafcf7b5..ff66dbcfb8 100644
 --- a/packages/core/test/session-execution.test.ts
@@ -140,6 +482,144 @@ index d6cafcf7b5..ff66dbcfb8 100644
  })
  
  describe("SessionRestart background recovery", () => {
+diff --git a/packages/core/test/tool-subagent.test.ts b/packages/core/test/tool-subagent.test.ts
+index 3d2c5f514e..400d66f630 100644
+--- a/packages/core/test/tool-subagent.test.ts
++++ b/packages/core/test/tool-subagent.test.ts
+@@ -813,4 +813,86 @@ describe("SubagentTool", () => {
+       ),
+     ),
+   )
++
++  it.live("waits for pending child background work before notifying the parent", () =>
++    Effect.acquireRelease(
++      Effect.promise(() => tmpdir()),
++      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
++    ).pipe(
++      Effect.flatMap((dir) =>
++        Effect.gen(function* () {
++          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
++          const sessions = yield* Session.Service
++          const parent = yield* sessions.create({ location })
++          const child = yield* sessions.create({
++            parentID: parent.id,
++            title: "review",
++            agent: Agent.ID.make("reviewer"),
++            model: childModel,
++          })
++          yield* withSubagent(parent.location)
++          const locations = yield* LocationServiceMap.Service
++          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
++          const jobs = yield* Job.Service
++          const bus = yield* Bus.Service
++
++          // The child ends its turn while its own background shell is still running.
++          const shellGate = yield* Deferred.make<void>()
++          const shell = yield* jobs.start({
++            id: "sh_child_pending",
++            type: "shell",
++            title: "sleep",
++            recovery: { kind: "shell", sessionID: child.id, shellID: "sh_child_pending", command: "sleep" },
++            run: Deferred.await(shellGate).pipe(Effect.as("")),
++          })
++          const marker = yield* jobs.background(shell.id)
++          if (!marker?.notificationID) return yield* Effect.die("Expected a pending shell marker")
++
++          const childTurn = yield* bus.subscribe(SessionEvent.Text.Ended).pipe(
++            Stream.filter((event) => event.data.sessionID === child.id),
++            Stream.take(1),
++            Stream.runCollect,
++            Effect.forkScoped({ startImmediately: true }),
++          )
++          const notified = yield* bus.subscribe(SessionEvent.InboxEnqueued).pipe(
++            Stream.filter((event) => event.data.sessionID === parent.id && event.data.item.type === "synthetic"),
++            Stream.take(1),
++            Stream.runCollect,
++            Effect.forkScoped({ startImmediately: true }),
++          )
++
++          const settled = yield* executeTool(registry, {
++            sessionID: parent.id,
++            ...toolIdentity,
++            call: {
++              type: "tool-call",
++              id: "call-child-pending",
++              name: SubagentTool.name,
++              input: {
++                agent: "reviewer",
++                description: "background review",
++                prompt: "review",
++                sessionID: child.id,
++                background: true,
++              },
++            },
++          })
++          expect(settled.metadata).toMatchObject({ sessionID: child.id, status: "running" })
++
++          yield* Fiber.join(childTurn)
++          yield* Effect.sleep("20 millis")
++          expect((yield* jobs.get(child.id))?.status).toBe("running")
++          expect((yield* sessions.inbox(parent.id)).filter((item) => item.type === "synthetic")).toEqual([])
++
++          // Acknowledging the shell notification clears its marker; only then may the child settle.
++          yield* jobs.completeBackground(marker.notificationID)
++          const admission = Array.from(yield* Fiber.join(notified))[0]
++          expect(admission?.data.item.type).toBe("synthetic")
++          if (admission?.data.item.type !== "synthetic") return yield* Effect.die("Expected a synthetic inbox item")
++          expect(admission.data.item.payload.text).toContain(`<subagent sessionID="${child.id}" state="completed"`)
++          expect((yield* jobs.get(child.id))?.status).toBe("completed")
++        }),
++      ),
++    ),
++  )
+ })
+diff --git a/packages/plugin/src/tui/context.ts b/packages/plugin/src/tui/context.ts
+index fe641b39d5..09b681d705 100644
+--- a/packages/plugin/src/tui/context.ts
++++ b/packages/plugin/src/tui/context.ts
+@@ -72,7 +72,7 @@ export interface Data {
+     root(sessionID: string): string
+     family(sessionID: string): string[]
+     cost(sessionID: string): number
+-    status(sessionID: string): "idle" | "running"
++    status(sessionID: string): "idle" | "running" | "waiting"
+     readonly pending: {
+       list(sessionID: string): SessionInboxInfo[]
+       sync(sessionID: string): Promise<void>
+diff --git a/packages/schema/src/session-status-event.ts b/packages/schema/src/session-status-event.ts
+index da37144d2e..757ddbc41d 100644
+--- a/packages/schema/src/session-status-event.ts
++++ b/packages/schema/src/session-status-event.ts
+@@ -29,6 +29,9 @@ export const Info = Schema.Union([
+   Schema.Struct({
+     type: Schema.Literal("busy"),
+   }),
++  Schema.Struct({
++    type: Schema.Literal("waiting"),
++  }),
+ ]).annotate({ identifier: "SessionStatus" })
+ export type Info = Schema.Schema.Type<typeof Info>
+ 
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index 73f61f329c..d4b74e5662 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -1902,6 +1902,15 @@ export function Prompt(props: PromptProps) {
+                       />
+                     </box>
+                   </Match>
++                  <Match when={status() === "waiting"}>
++                    <box flexDirection="row" gap={1} flexGrow={1} justifyContent="flex-start">
++                      <box marginLeft={1}>
++                        <text fg={theme.text.muted} wrapMode="none" truncate>
++                          waiting for background work…
++                        </text>
++                      </box>
++                    </box>
++                  </Match>
+                   <Match when={move.progress()}>
+                     {(progress) => (
+                       <box paddingLeft={3} height={1} minHeight={0} flexShrink={1}>
 diff --git a/packages/tui/src/context/session-tabs.tsx b/packages/tui/src/context/session-tabs.tsx
 index 7b7f9f8c1c..a2ae49050e 100644
 --- a/packages/tui/src/context/session-tabs.tsx
@@ -154,10 +634,10 @@ index 7b7f9f8c1c..a2ae49050e 100644
          ),
          renaming: data.session.title.pending(session),
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index d75c1e0bd8..cae3bbdc51 100644
+index d8f0b2d83c..8d4310b2bc 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -3106,7 +3106,10 @@ function Subagent(props: ToolProps) {
+@@ -3093,7 +3093,10 @@ function Subagent(props: ToolProps) {
    const model = createMemo(() => subagentModelLabel(stringValue(props.input.model), data.location.model.list()))
    const isRunning = createMemo(() => {
      const id = sessionID()
