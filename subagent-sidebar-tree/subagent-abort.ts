@@ -7,7 +7,7 @@
  *
  * ── API EVIDENCE (OpenCode v2.0.6, this machine) ────────────────────────────
  * Proven from the installed runtime binary
- * (`%USERPROFILE%\.opencode\bin\opencode.exe`, 215,358,504 bytes) which
+ * (the installed `opencode.exe`, 215,358,504 bytes) which
  * embeds the plaintext JS, and from a live plugin-context probe
  * (`always-background/index.probe.js`):
  *

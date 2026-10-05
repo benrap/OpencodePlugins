@@ -1,11 +1,16 @@
 # switch-patched.ps1
-# Prepends %USERPROFILE%\.opencode-patched to the User PATH so that
-# `opencode` resolves to the patched shim (opencode.cmd) in new shells.
+# Prepends the patched shim directory (default: %USERPROFILE%\.opencode-patched,
+# override with $env:OPENCODE_PATCHED_DIR) to the User PATH so that `opencode`
+# resolves to the patched shim (opencode.cmd) in new shells.
 # Idempotent: safe to run multiple times.
 
 $ErrorActionPreference = 'Stop'
 
-$shimDir = '%USERPROFILE%\.opencode-patched'
+$shimDir = if ($env:OPENCODE_PATCHED_DIR) {
+    $env:OPENCODE_PATCHED_DIR
+} else {
+    Join-Path $env:USERPROFILE '.opencode-patched'
+}
 
 # Read current User PATH
 $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')

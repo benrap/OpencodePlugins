@@ -15,7 +15,8 @@ sourced from this repo.
 
 ## Installation instructions (for AI agents)
 
-All paths below are real on this host. Config root: `~/.config/opencode` (`$env:USERPROFILE\.config\opencode`).
+Paths below use `%USERPROFILE%` and `<repo-root>` placeholders — substitute
+your own. Config root: `~/.config/opencode` (`$env:USERPROFILE\.config\opencode`).
 
 ### 1. Register plugins in `~/.config/opencode/opencode.jsonc`
 

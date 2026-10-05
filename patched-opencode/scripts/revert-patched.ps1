@@ -1,10 +1,15 @@
 # revert-patched.ps1
-# Removes %USERPROFILE%\.opencode-patched from the User PATH, restoring
-# stock opencode resolution. Idempotent: safe to run multiple times.
+# Removes the patched shim directory (default: %USERPROFILE%\.opencode-patched,
+# override with $env:OPENCODE_PATCHED_DIR) from the User PATH, restoring stock
+# opencode resolution. Idempotent: safe to run multiple times.
 
 $ErrorActionPreference = 'Stop'
 
-$shimDir = '%USERPROFILE%\.opencode-patched'
+$shimDir = if ($env:OPENCODE_PATCHED_DIR) {
+    $env:OPENCODE_PATCHED_DIR
+} else {
+    Join-Path $env:USERPROFILE '.opencode-patched'
+}
 
 # Read current User PATH
 $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')

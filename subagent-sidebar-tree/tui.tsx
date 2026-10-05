@@ -1,6 +1,8 @@
 /** @jsxImportSource @opentui/solid */
 
 import { appendFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Plugin } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/context"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
@@ -56,7 +58,8 @@ const SESSION_SIDEBAR_WIDTH = 42
  * panel on a narrow terminal (it would trap focus).
  */
 const MIN_PANEL_TERMINAL_WIDTH = 80
-const LIVE_LOG_PATH = "<temp-checkout>\\subagent-sidebar-tree-live.log"
+const LIVE_LOG_PATH =
+  process.env.SUBAGENT_TREE_LOG ?? join(tmpdir(), "subagent-sidebar-tree-live.log")
 
 /**
  * Best-effort live log for diagnosing the right-pane panel at runtime. Every
