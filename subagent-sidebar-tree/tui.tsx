@@ -44,6 +44,13 @@ const PLUGIN_ID = "subagent-sidebar-tree"
 /** Panel name registered in `session.panel`; contributions gate on it. */
 const PANEL_NAME = "subagent-tree"
 /**
+ * The `sidebar.content` slot contribution. It APPENDS the tree so OpenCode's
+ * core sidebar renders its own context-information block (tokens / % used /
+ * spend) ABOVE the tree. Frozen and exported so the claim ordering is testable
+ * without rendering and can never drift back to a prepend by accident.
+ */
+export const SIDEBAR_CONTENT_CLAIM = { append: "sidebar.content" } as const
+/**
  * Core right-sidebar width (`SESSION_SIDEBAR_WIDTH` in
  * `packages/tui/src/component/session-frame.tsx`). The `session.panel` right
  * pane does NOT use this value — the host sizes it to ~50% of the terminal —
@@ -206,7 +213,12 @@ function isPrimaryMouseButton(event: { button: number }): boolean {
   return event.button === 0
 }
 
-function openSubagent(context: Context, sessionID: string, event: { button: number }): void {
+/**
+ * Single press handler bound to EVERY `SubagentRow`, including the synthesized
+ * root/MAIN row. Exported so the press behavior (primary button navigates, other
+ * buttons are ignored) can be asserted directly without rendering.
+ */
+export function openSubagent(context: Context, sessionID: string, event: { button: number }): void {
   if (!isPrimaryMouseButton(event)) return
   context.ui.router.navigate({ type: "session", sessionID })
 }
@@ -508,6 +520,19 @@ function SidebarSubagents(props: {
     expanded() ? nodes() : nodes().slice(0, MAX_VISIBLE_SUBAGENTS),
   )
 
+  // The family root (MAIN/ROOT agent) is rendered as a real tree row ABOVE the
+  // descendant rows, flush-left (empty prefix). It uses the same `SubagentRow`,
+  // so its type/state/context/preview and click wiring match every other entry.
+  const rootSession = () => props.context.data.session.get(props.sessionID)
+  const rootNode = (): SubagentTreeNode => ({
+    session: rootSession()!,
+    depth: 0,
+    isLast: false,
+    ancestorIsLast: [],
+    prefix: "",
+    contPrefix: "",
+  })
+
   // Let a host (the right-pane panel) observe what actually rendered. The
   // callback is expected to dedupe; this effect re-runs on every tree change.
   createEffect(() => {
@@ -552,9 +577,14 @@ function SidebarSubagents(props: {
         paddingRight={props.overlay ? 2 : 0}
         backgroundColor={props.overlay ? raisedBg() : undefined}
       >
-        <text fg={context.theme.text.base} wrapMode="none">
-          SUBAGENTS ({nodes().length})
-        </text>
+        <Show when={rootSession()}>
+          <SubagentRow
+            context={context}
+            session={rootSession()!}
+            node={rootNode()}
+            currentSessionID={props.currentSessionID}
+          />
+        </Show>
         <Show
           when={expanded()}
           fallback={
@@ -917,7 +947,7 @@ export default Plugin.define({
     // registration below is the fallback that renders the same tree in the
     // right pane for subagents.
     const unregisterSidebar = context.ui.slot({
-      prepend: "sidebar.content",
+      ...SIDEBAR_CONTENT_CLAIM,
       render: ({ sessionID }) => (
         <SubagentSidebar context={context} sessionID={sessionID} syncState={syncState} />
       ),

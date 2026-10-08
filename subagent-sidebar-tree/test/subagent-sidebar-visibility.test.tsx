@@ -25,7 +25,7 @@ import { expect, test } from "bun:test"
 import { RGBA } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import type { Context } from "@opencode/plugin/tui/context"
-import { SubagentSidebar } from "../tui"
+import { openSubagent, SIDEBAR_CONTENT_CLAIM, SubagentSidebar } from "../tui"
 
 const WIDTH = 140
 const HEIGHT = 30
@@ -189,6 +189,15 @@ function columnOf(frame: string, needle: string): number {
   return -1
 }
 
+/** 0-based index of the first line containing `needle`, or -1. */
+function lineIndexOf(frame: string, needle: string): number {
+  const lines = frame.split("\n")
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].includes(needle)) return index
+  }
+  return -1
+}
+
 function overlaps(a: { x: number; width: number }, b: { x: number; width: number }): boolean {
   return a.x < b.x + b.width && a.x + a.width > b.x
 }
@@ -245,13 +254,19 @@ test("subagent sidebar is a flex sibling: main + bottom panels resized, not cove
 
     const frame = app.captureCharFrame()
 
-    // (4) the tree is rendered inside the sidebar.
+    // (4) the tree is rendered inside the sidebar: the MAIN/ROOT row first,
+    // then the descendant rows.
     expect(inner).toBeDefined()
-    expect(frame).toContain("SUBAGENTS (3)")
+    expect(frame).toContain("build")
     expect(frame).toContain("explore")
     expect(frame).toContain("general")
     expect(frame).toContain("plan")
-    expect(columnOf(frame, "SUBAGENTS (3)")).toBeGreaterThanOrEqual(sidebar.x)
+    // The aggregate header is gone (replaced by the root row).
+    expect(frame).not.toContain("SUBAGENTS (")
+    // Root (build) renders strictly ABOVE the first child row (explore).
+    expect(lineIndexOf(frame, "build")).toBeGreaterThanOrEqual(0)
+    expect(lineIndexOf(frame, "build")).toBeLessThan(lineIndexOf(frame, "explore"))
+    expect(columnOf(frame, "build")).toBeGreaterThanOrEqual(sidebar.x)
     expect(columnOf(frame, "explore")).toBeGreaterThanOrEqual(sidebar.x)
     expect(columnOf(frame, "general")).toBeGreaterThanOrEqual(sidebar.x)
 
@@ -271,10 +286,85 @@ test("root sessions also render the tree in the sidebar (no overlay)", async () 
   const app = await render("ses_root")
   try {
     const frame = app.captureCharFrame()
-    expect(frame).toContain("SUBAGENTS (3)")
+    expect(frame).toContain("build")
+    expect(frame).not.toContain("SUBAGENTS (")
+    expect(frame).toContain("explore")
+    expect(lineIndexOf(frame, "build")).toBeLessThan(lineIndexOf(frame, "explore"))
     expect(frame).toContain("MAIN PANEL CONTENT")
     expect(app.renderer.root.findDescendantById("subagent-sidebar")).toBeDefined()
   } finally {
     app.renderer.destroy()
   }
+})
+
+/**
+ * The root/MAIN row and every descendant row share the exact same press handler
+ * (`openSubagent`). Drive it directly: the primary button navigates to the
+ * session, any other button is a no-op.
+ */
+test("openSubagent (root-row handler): primary button navigates, others do not", () => {
+  const destinations: Array<{ type: string; sessionID: string }> = []
+  const context = {
+    ui: {
+      router: {
+        navigate: (target: { type: string; sessionID: string }) => {
+          destinations.push(target)
+        },
+      },
+    },
+  } as unknown as Context
+
+  openSubagent(context, "ses_root", { button: 0 })
+  expect(destinations).toEqual([{ type: "session", sessionID: "ses_root" }])
+
+  openSubagent(context, "ses_root", { button: 1 })
+  expect(destinations).toEqual([{ type: "session", sessionID: "ses_root" }])
+})
+
+/**
+ * Change #3: the tree is APPENDED to `sidebar.content` so OpenCode's core
+ * context-information block renders ABOVE it. The exported frozen descriptor is
+ * the single source of the claim used by the plugin's slot registration.
+ */
+test("sidebar.content claim is append (tree renders after the core context block)", () => {
+  expect(SIDEBAR_CONTENT_CLAIM.append).toBe("sidebar.content")
+  expect("prepend" in SIDEBAR_CONTENT_CLAIM).toBe(false)
+})
+
+/**
+ * Drive the real default plugin export's `setup` with a mock Context that
+ * records `ui.slot` claims, and assert the sidebar contribution uses `append`.
+ * `Plugin.define` returns the definition as-is, so `setup` is directly callable.
+ */
+test("plugin setup registers the sidebar slot with append", async () => {
+  const claims: Array<Record<string, unknown>> = []
+  const context = {
+    ui: {
+      router: { current: () => ({ type: "root" }), navigate: () => {} },
+      slot: (claim: Record<string, unknown>) => {
+        claims.push(claim)
+        return () => {}
+      },
+    },
+    data: {
+      on: () => () => {},
+      session: {
+        get: () => undefined,
+        sync: async () => {},
+        message: { sync: async () => {} },
+      },
+    },
+    client: { session: { list: async () => ({ data: [] }) } },
+  } as unknown as Context
+
+  const plugin = (await import("../tui")).default as { setup: (context: Context) => unknown }
+  const cleanup = plugin.setup(context)
+  if (typeof cleanup === "function") cleanup()
+
+  const sidebarClaim = claims.find(
+    (claim) => claim.append === "sidebar.content" || claim.prepend === "sidebar.content",
+  )
+  expect(sidebarClaim).toBeDefined()
+  expect(sidebarClaim?.append).toBe("sidebar.content")
+  expect(sidebarClaim?.prepend).toBeUndefined()
 })
