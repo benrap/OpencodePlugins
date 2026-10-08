@@ -50,7 +50,19 @@
  *
  * Fail-safe: a plugin error must never break host startup, so `setup` is fully
  * wrapped and becomes a clean no-op when the expected context is unavailable.
+ *
+ * The `all` mode enumerates ACTIVE subagents from a process-wide, event-fed
+ * registry (see `./subagent-registry.js`): OpenCode v2.0.6 exposes no
+ * `ctx.session.list`, so the inventory is folded from `ctx.event.subscribe`.
  */
+
+import {
+  activeSubagentSessions,
+  globalRegistry,
+  resolveName,
+  sessionState,
+  subscribeRegistry,
+} from './subagent-registry.js';
 
 const TOOL_NAME = 'subagent-status';
 
@@ -61,7 +73,9 @@ const TOOL_DESCRIPTION =
   'status (running/completed/failed/blocked), key findings and decisions, ' +
   'blockers, and the likely next step. Pass the subagent\'s sessionID (the id ' +
   'returned when it was spawned). Set mode to "state" for a lightweight ' +
-  'status check (running/idle/waiting/finished) without an LLM call.';
+  'status check (running/idle/waiting/finished) without an LLM call. Set mode ' +
+  'to "all" to list the name and state of every active (running/waiting) ' +
+  'subagent; "all" needs no sessionID and makes no LLM call.';
 
 const INPUT_SCHEMA = {
   type: 'object',
@@ -84,15 +98,15 @@ const INPUT_SCHEMA = {
     },
     mode: {
       type: 'string',
-      enum: ['state', 'summary'],
+      enum: ['state', 'summary', 'all'],
       default: 'state',
       description:
         '"state" (default) returns only the session state ' +
         '(running/idle/waiting/finished) without an LLM call. "summary" also ' +
-        'generates an LLM summary.',
+        'generates an LLM summary. "all" returns the name and state of every ' +
+        'active (running/waiting) subagent and needs no sessionID.',
     },
   },
-  required: ['sessionID'],
   additionalProperties: false,
 };
 
@@ -105,9 +119,16 @@ const OUTPUT_SCHEMA = {
       description: 'Session state: running, idle, waiting, or finished.',
     },
     summary: { type: 'string' },
+    subagents: {
+      type: 'array',
+      items: { type: 'object' },
+      description:
+        'Active (running/waiting) subagents, each { name, state, sessionID } (' +
+        'mode "all").',
+    },
+    count: { type: 'integer' },
     error: { type: 'string' },
   },
-  required: ['sessionID'],
   additionalProperties: false,
 };
 
@@ -479,7 +500,7 @@ async function determineState(ctx, sessionID, messages) {
 // Tool definition.
 // ---------------------------------------------------------------------------
 
-function makeTool(ctx) {
+function makeTool(ctx, registry = globalRegistry()) {
   return {
     name: TOOL_NAME,
     description: TOOL_DESCRIPTION,
@@ -489,9 +510,34 @@ function makeTool(ctx) {
     execute: async (input) => {
       const args = input && typeof input === 'object' ? input : {};
       const sessionID = typeof args.sessionID === 'string' ? args.sessionID.trim() : '';
-      const mode = args.mode === 'summary' ? 'summary' : 'state';
+      const mode = args.mode === 'summary' ? 'summary' : args.mode === 'all' ? 'all' : 'state';
 
-      if (!sessionID) {
+      if (mode === 'all') {
+        try {
+          const records = activeSubagentSessions(registry);
+          const subagents = records.map((record) => ({
+            name: resolveName(record),
+            state: sessionState(record),
+            sessionID: record.id,
+          }));
+          return {
+            output: { subagents, count: subagents.length },
+            content: subagents.length
+              ? `${subagents.length} active subagent(s): ${subagents
+                  .map((subagent) => `${subagent.name} (${subagent.state})`)
+                  .join(', ')}`
+              : 'No active subagents.',
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            output: { subagents: [], count: 0, error: message },
+            content: 'subagent-status(all): ' + message,
+          };
+        }
+      }
+
+      if (mode !== 'all' && !sessionID) {
         const message = 'subagent-status: `sessionID` is required.';
         return { output: { sessionID: '', state: 'idle', error: 'missing-sessionID' }, content: message };
       }
@@ -540,6 +586,10 @@ function makeTool(ctx) {
 
 function setup(ctx) {
   try {
+    // Fold the host session-event stream into the process-wide registry so the
+    // `all` mode can enumerate active subagents. No-op when unavailable.
+    subscribeRegistry(ctx, globalRegistry());
+
     if (!ctx || !ctx.tool || typeof ctx.tool.transform !== 'function') {
       try {
         console.warn('[subagent-status] ctx.tool.transform unavailable; tool not registered');
@@ -551,7 +601,7 @@ function setup(ctx) {
 
     const result = ctx.tool.transform((editor) => {
       if (!editor || typeof editor.add !== 'function') return;
-      editor.add(makeTool(ctx));
+      editor.add(makeTool(ctx, globalRegistry()));
     });
 
     // `transform` may be effect/promise-based on some runtimes; swallow failures.
@@ -570,6 +620,17 @@ function setup(ctx) {
     }
   }
 }
+
+export { TOOL_NAME, makeTool };
+export {
+  activeSubagentSessions,
+  createRegistry,
+  globalRegistry,
+  noteEvent,
+  resolveName,
+  sessionState,
+  subscribeRegistry,
+} from './subagent-registry.js';
 
 export default {
   id: 'subagent-status',
