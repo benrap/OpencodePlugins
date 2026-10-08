@@ -179,6 +179,15 @@ function columnOf(frame: string, needle: string): number {
   return -1
 }
 
+/** 0-based index of the first line containing `needle`, or -1. */
+function lineIndexOf(frame: string, needle: string): number {
+  const lines = frame.split("\n")
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].includes(needle)) return index
+  }
+  return -1
+}
+
 function overlaps(a: { x: number; width: number }, b: { x: number; width: number }): boolean {
   return a.x < b.x + b.width && a.x + a.width > b.x
 }
@@ -224,14 +233,17 @@ test("subagent tree renders in the right pane for a subagent session", async () 
     // (a) the tree text appears in the RIGHT PANE region.
     expect(panel).toBeDefined()
     expect(frame).toContain("Subagent tree")
-    expect(frame).toContain("SUBAGENTS (3)")
+    expect(frame).toContain("build")
+    expect(frame).not.toContain("SUBAGENTS (")
     expect(frame).toContain("explore")
     expect(frame).toContain("general")
     expect(frame).toContain("plan")
     expect(columnOf(frame, "Subagent tree")).toBeGreaterThanOrEqual(right.x)
-    expect(columnOf(frame, "SUBAGENTS (3)")).toBeGreaterThanOrEqual(right.x)
+    expect(columnOf(frame, "build")).toBeGreaterThanOrEqual(right.x)
     expect(columnOf(frame, "explore")).toBeGreaterThanOrEqual(right.x)
     expect(columnOf(frame, "general")).toBeGreaterThanOrEqual(right.x)
+    // Root (build) renders strictly ABOVE the first child row (explore).
+    expect(lineIndexOf(frame, "build")).toBeLessThan(lineIndexOf(frame, "explore"))
 
     // (b) it does NOT cover the main panel: the main panel is still visible and
     // is geometrically to the LEFT of the right pane, which is not overlapped.

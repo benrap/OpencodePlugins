@@ -217,6 +217,15 @@ function columnOf(frame: string, needle: string): number {
   return -1
 }
 
+/** 0-based index of the first line containing `needle`, or -1. */
+function lineIndexOf(frame: string, needle: string): number {
+  const lines = frame.split("\n")
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].includes(needle)) return index
+  }
+  return -1
+}
+
 function node(app: any, id: string) {
   return app.renderer.root.findDescendantById(id) ?? undefined
 }
@@ -230,14 +239,17 @@ test("gated host: subagent tree renders in the PANEL, not the sidebar", async ()
     expect(panel.opened).toEqual([PANEL_NAME])
 
     const frame = app.captureCharFrame()
-    // (a) the panel's tree header + rows render in the right pane.
+    // (a) the panel's tree header + rows render in the right pane, with the
+    // MAIN/ROOT row first and no aggregate header.
     expect(frame).toContain("Subagent tree")
-    expect(frame).toContain("SUBAGENTS (3)")
+    expect(frame).toContain("build")
+    expect(frame).not.toContain("SUBAGENTS (")
     expect(frame).toContain("explore")
     expect(frame).toContain("general")
     expect(frame).toContain("plan")
-    expect(columnOf(frame, "SUBAGENTS (3)")).toBeGreaterThanOrEqual(right.x)
+    expect(columnOf(frame, "build")).toBeGreaterThanOrEqual(right.x)
     expect(columnOf(frame, "explore")).toBeGreaterThanOrEqual(right.x)
+    expect(lineIndexOf(frame, "build")).toBeLessThan(lineIndexOf(frame, "explore"))
 
     // (b) no core sidebar contribution rendered for the subagent.
     expect(node(app, "subagent-sidebar")).toBeUndefined()
@@ -259,9 +271,11 @@ test("ungated host: subagent tree renders in the SIDEBAR and NO panel opens", as
     expect(node(app, "session-panel")).toBeUndefined()
 
     const frame = app.captureCharFrame()
-    expect(frame).toContain("SUBAGENTS (3)")
+    expect(frame).toContain("build")
+    expect(frame).not.toContain("SUBAGENTS (")
     expect(frame).toContain("explore")
-    expect(columnOf(frame, "SUBAGENTS (3)")).toBeGreaterThanOrEqual(sidebar.x)
+    expect(columnOf(frame, "build")).toBeGreaterThanOrEqual(sidebar.x)
+    expect(lineIndexOf(frame, "build")).toBeLessThan(lineIndexOf(frame, "explore"))
     // The panel-only header must be absent: the tree lives in the sidebar.
     expect(frame).not.toContain("Subagent tree")
   } finally {
@@ -280,7 +294,8 @@ test("ungated host: navigation keeps the tree in the sidebar (per-route tracking
     expect(node(app, "core-sidebar")).toBeDefined()
     expect(node(app, "subagent-sidebar")).toBeDefined()
     const frame = app.captureCharFrame()
-    expect(frame).toContain("SUBAGENTS (3)")
+    expect(frame).toContain("build")
+    expect(frame).not.toContain("SUBAGENTS (")
     expect(frame).not.toContain("Subagent tree")
   } finally {
     app.renderer.destroy()
