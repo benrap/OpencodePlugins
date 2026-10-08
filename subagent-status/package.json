@@ -4,5 +4,8 @@
   "type": "module",
   "description": "Probe a subagent's state via an LLM-generated summary of its conversation.",
   "main": "index.js",
+  "scripts": {
+    "test": "node test/subagent-status.test.mjs"
+  },
   "oc-plugin": ["server"]
 }
