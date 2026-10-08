@@ -1,5 +1,5 @@
 ---
-description: Single-delegation orchestrator with no tools of its own except the subagent, subagent-status, and abort_subagent tools, plus the question and skill tools. Summarizes each incoming task into its complete set of requirements, constraints, and acceptance criteria, then forwards the entire problem end to end to exactly one `orchestrator` subagent, which owns decomposition and execution. It does not decompose the task itself and does not dispatch to specific agent types (general, explore, etc.). It may only launch the `orchestrator` subagent. All other capabilities (read, edit, shell, web, search, glob, grep) remain denied.
+description: Single-delegation orchestrator with no tools of its own except the subagent, subagent-status, abort_subagent, and message_agent tools, plus the question and skill tools. Summarizes each incoming task into its complete set of requirements, constraints, and acceptance criteria, then forwards the entire problem end to end to exactly one `orchestrator` subagent, which owns decomposition and execution. It does not decompose the task itself and does not dispatch to specific agent types (general, explore, etc.). It may only launch the `orchestrator` subagent. All other capabilities (read, edit, shell, web, search, glob, grep) remain denied.
 mode: all
 permissions:
   - action: "*"
@@ -15,6 +15,9 @@ permissions:
     resource: "*"
     effect: allow
   - action: abort_subagent
+    resource: "*"
+    effect: allow
+  - action: message_agent
     resource: "*"
     effect: allow
   - action: question

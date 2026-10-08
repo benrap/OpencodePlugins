@@ -1,0 +1,11 @@
+{
+  "name": "@opencode-plugins/subagent-message",
+  "version": "0.1.0",
+  "description": "OpenCode server plugin: lineage-scoped agent-to-agent messaging (parent<->direct child only).",
+  "type": "module",
+  "main": "./server.ts",
+  "exports": { "./server": "./server.ts" },
+  "oc-plugin": ["server"],
+  "files": ["server.ts", "subagent-message.ts", "lineage.ts"],
+  "engines": { "node": ">=22" }
+}
