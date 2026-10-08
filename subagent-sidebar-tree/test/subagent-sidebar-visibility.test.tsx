@@ -51,8 +51,16 @@ const SESSIONS: MockSession[] = [
   { id: "ses_grand", parentID: "ses_child", agent: "plan", title: "Grandchild", time: { updated: 50 } },
 ]
 
-function mockContext(currentSessionID: string): Context {
-  const byID = new Map(SESSIONS.map((session) => [session.id, session]))
+/**
+ * The "only the MAIN/root agent, no subagents" case. The root must still render
+ * as the sole tree row.
+ */
+const ONLY_ROOT_SESSIONS: MockSession[] = [
+  { id: "ses_root", agent: "build", title: "Root", time: { updated: 100 } },
+]
+
+function mockContext(currentSessionID: string, sessions: MockSession[] = SESSIONS): Context {
+  const byID = new Map(sessions.map((session) => [session.id, session]))
   return {
     theme: {
       background: { base: raised, raised: { base: raised }, default: raised, surface: { offset: raised } },
@@ -72,9 +80,9 @@ function mockContext(currentSessionID: string): Context {
     },
     data: {
       session: {
-        list: () => SESSIONS,
+        list: () => sessions,
         get: (id: string) => byID.get(id),
-        root: () => "ses_root",
+        root: () => sessions.find((session) => !session.parentID)?.id ?? "ses_root",
         status: () => "running",
         sync: async () => {},
         message: { list: () => [], sync: async () => {} },
@@ -169,8 +177,8 @@ function Harness(props: {
   )
 }
 
-async function render(sessionID: string) {
-  const context = mockContext(sessionID)
+async function render(sessionID: string, sessions: MockSession[] = SESSIONS) {
+  const context = mockContext(sessionID, sessions)
   const syncState = { children: new Set<string>(), messages: new Set<string>() }
   const app = await testRender(() => <Harness context={context} sessionID={sessionID} syncState={syncState} />, {
     width: WIDTH,
@@ -292,6 +300,40 @@ test("root sessions also render the tree in the sidebar (no overlay)", async () 
     expect(lineIndexOf(frame, "build")).toBeLessThan(lineIndexOf(frame, "explore"))
     expect(frame).toContain("MAIN PANEL CONTENT")
     expect(app.renderer.root.findDescendantById("subagent-sidebar")).toBeDefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+/**
+ * The MAIN/ROOT agent row must ALWAYS be shown, including when it is the ONLY
+ * entry. Before the fix the whole tree was gated behind `nodes().length > 0`
+ * (descendant rows only), so a session with no child subagents rendered
+ * nothing. This is the regression guard for that bug.
+ */
+test("root/MAIN row renders when it is the only entry (no subagents)", async () => {
+  const app = await render("ses_root", ONLY_ROOT_SESSIONS)
+  try {
+    const frame = app.captureCharFrame()
+    // Visible output in the test log (parity with `report`).
+    console.log("\n===== sidebar frame (no subagents: only MAIN/ROOT row) =====")
+    console.log(frame)
+
+    const sidebar = app.renderer.root.findDescendantById("core-sidebar")!
+    const inner = app.renderer.root.findDescendantById("subagent-sidebar")!
+    expect(inner).toBeDefined()
+
+    // The root agent label is present even with no descendants.
+    expect(frame).toContain("build")
+    // No aggregate header, and no descendant labels.
+    expect(frame).not.toContain("SUBAGENTS (")
+    expect(frame).not.toContain("explore")
+    expect(frame).not.toContain("general")
+    expect(frame).not.toContain("plan")
+
+    // The root row is present and rendered at a column >= sidebar.x.
+    expect(lineIndexOf(frame, "build")).toBeGreaterThanOrEqual(0)
+    expect(columnOf(frame, "build")).toBeGreaterThanOrEqual(sidebar.x)
   } finally {
     app.renderer.destroy()
   }
