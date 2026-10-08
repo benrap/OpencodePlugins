@@ -1,0 +1,38 @@
+{
+  "name": "local-opencode-subagent-steer",
+  "version": "1.0.0",
+  "description": "OpenCode V2 TUI plugin that lets you steer the child subagent session you are currently viewing.",
+  "license": "MIT",
+  "author": "benrap",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benrap/OpencodePlugins.git",
+    "directory": "subagent-steer"
+  },
+  "type": "module",
+  "main": "./server.ts",
+  "exports": {
+    "./tui": "./tui.tsx",
+    "./server": "./server.ts"
+  },
+  "oc-plugin": [
+    "server",
+    "tui"
+  ],
+  "files": [
+    "tui.tsx",
+    "server.ts",
+    "steer.ts"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.12"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.10",
+    "@opentui/solid": ">=0.5.10",
+    "solid-js": ">=1.9.0"
+  }
+}

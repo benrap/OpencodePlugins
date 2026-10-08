@@ -1,0 +1,385 @@
+# 0003: inline steer composer for child/subagent sessions.
+# Files: packages/tui/src/routes/session/index.tsx    (render the host Prompt for child sessions)
+#        packages/tui/src/context/local.tsx           (composer agent type follows the viewed child's agent)
+#        packages/tui/src/app.tsx                      (do not carry a subagent agent into a new session)
+#        packages/tui/src/component/prompt/index.tsx   (blue composer palette while viewing a subagent)
+#        packages/tui/test/child-composer-steer.test.tsx (regression test)
+# Viewing a child session renders the normal Prompt; typing submits to the viewed
+# child as a steer (delivery defaults to "steer"). The composer's agent type
+# reflects that child's own agent (often mode:"subagent", which the primary list
+# excludes) and the whole composer box uses a distinct blue palette, so it is
+# obvious who is being spoken to. The subagent picker stays opt-in via
+# "session.child.first"; main-session behavior is unchanged. Applies on top of
+# 0001 + 0002 on opencode v2.0.23 (0fd7e2829449b052abf0078666669302923d77af).
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 44e49b1c19..bff350ebbd 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -728,7 +728,7 @@ function App() {
+               location.error?.location,
+             ),
+           })
+-          if (agent) local.agent.set(agent.id)
++          if (agent && agent.mode !== "subagent") local.agent.set(agent.id)
+           if (model) local.model.set(model)
+           dialog.clear()
+         },
+@@ -755,7 +755,7 @@ function App() {
+               location.error?.location,
+             ),
+           })
+-          if (agent) local.agent.set(agent.id)
++          if (agent && agent.mode !== "subagent") local.agent.set(agent.id)
+           if (model) local.model.set(model)
+           dialog.clear()
+         },
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index d4b74e5662..49869f4b2c 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -100,6 +100,15 @@ export type PromptRef = {
+ const DRAFT_RETENTION_MIN_CHARS = 20
+ const revealedPromptMetadata = new WeakSet<object>()
+ 
++// Overlay applied to the composer while viewing a child/subagent session so the
++// whole text box reads as a distinct blue palette. Blended over the theme's own
++// composer tokens, so lightness follows the theme and the text stays legible in
++// both light and dark modes.
++const SUBAGENT_COMPOSER_BLUE = RGBA.fromHex("#3b82f6")
++const SUBAGENT_COMPOSER_BG_ALPHA = 0.4
++const SUBAGENT_COMPOSER_BORDER_ALPHA = 0.9
++const SUBAGENT_COMPOSER_PLACEHOLDER_ALPHA = 0.6
++
+ function randomIndex(count: number) {
+   if (count <= 0) return 0
+   return Math.floor(Math.random() * count)
+@@ -1650,7 +1659,24 @@ export function Prompt(props: PromptProps) {
+   })
+   const maxHeight = createMemo(() => Math.max(6, Math.floor(dimensions().height / 3)))
+ 
+-  const promptBg = createMemo(() => theme.decrease(theme.background.raised.base))
++  // True while the composer is the inline steer composer for a child/subagent
++  // session; drives the distinct blue palette so it is obvious who is being
++  // spoken to. Main sessions keep the normal palette.
++  const subagentComposer = createMemo(() => !!props.sessionID && !!data.session.get(props.sessionID)?.parentID)
++  const promptBg = createMemo(() => {
++    const base = theme.decrease(theme.background.raised.base)
++    return subagentComposer() ? tint(base, SUBAGENT_COMPOSER_BLUE, SUBAGENT_COMPOSER_BG_ALPHA) : base
++  })
++  const promptBorder = createMemo(() =>
++    subagentComposer()
++      ? tint(theme.border.base, SUBAGENT_COMPOSER_BLUE, SUBAGENT_COMPOSER_BORDER_ALPHA)
++      : borderHighlight(),
++  )
++  const promptPlaceholder = createMemo(() =>
++    subagentComposer()
++      ? tint(theme.text.muted, SUBAGENT_COMPOSER_BLUE, SUBAGENT_COMPOSER_PLACEHOLDER_ALPHA)
++      : theme.text.muted,
++  )
+ 
+   return (
+     <>
+@@ -1658,7 +1684,7 @@ export function Prompt(props: PromptProps) {
+         <box
+           width="100%"
+           border={["left"]}
+-          borderColor={borderHighlight()}
++          borderColor={promptBorder()}
+           customBorderChars={{
+             ...SplitBorder.customBorderChars,
+             bottomLeft: "╹",
+@@ -1744,7 +1770,7 @@ export function Prompt(props: PromptProps) {
+             <textarea
+               width="100%"
+               placeholder={placeholderText()}
+-              placeholderColor={theme.text.muted}
++              placeholderColor={promptPlaceholder()}
+               textColor={muted() ? theme.text.muted : theme.text.base}
+               focusedTextColor={muted() ? theme.text.muted : theme.text.base}
+               minHeight={1}
+@@ -1849,7 +1875,7 @@ export function Prompt(props: PromptProps) {
+         <box
+           height={1}
+           border={["left"]}
+-          borderColor={borderHighlight()}
++          borderColor={promptBorder()}
+           customBorderChars={{
+             ...EmptyBorder,
+             vertical: promptBg().a !== 0 ? "╹" : " ",
+diff --git a/packages/tui/src/context/local.tsx b/packages/tui/src/context/local.tsx
+index 311f511a79..0b7b02c803 100644
+--- a/packages/tui/src/context/local.tsx
++++ b/packages/tui/src/context/local.tsx
+@@ -60,6 +60,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+       const visibleAgents = createMemo(() =>
+         (data.location.agent.list(location.ref) ?? []).filter((agent) => !agent.hidden),
+       )
++      // A child/subagent session runs its own agent, which is frequently a
++      // `mode: "subagent"` agent deliberately absent from the primary `agents()`
++      // list. The composer must reflect that agent: otherwise the footer shows
++      // the main agent's type, and `prepareAgent` would switch the child's agent
++      // to the primary selection when a steer is submitted.
++      const viewedChildAgent = createMemo(() => {
++        if (route.data.type !== "session") return
++        const session = data.session.get(route.data.sessionID)
++        if (!session?.parentID || !session.agent) return
++        return (data.location.agent.list(location.ref) ?? []).find((item) => item.id === session.agent)
++      })
+       const [agentStore, setAgentStore] = createStore({
+         current: undefined as string | undefined,
+         draftBySession: {} as Record<string, { agent?: string } | undefined>,
+@@ -81,9 +92,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+       })
+       return {
+         list() {
+-          return agents()
++          // While viewing a child/subagent, that session's own agent is the only
++          // selectable one: its agent is fixed by the subagent it represents.
++          const child = viewedChildAgent()
++          return child ? [child] : agents()
+         },
+         current() {
++          const child = viewedChildAgent()
++          if (child) return child
+           const draft = route.data.type === "session" ? agentStore.draftBySession[route.data.sessionID] : undefined
+           const selected =
+             route.data.type === "session"
+@@ -95,7 +111,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+           return agents().find((agent) => agent.id === selected) ?? agents().at(0)
+         },
+         set(id: string) {
+-          if (!agents().some((agent) => agent.id === id))
++          if (!this.list().some((agent) => agent.id === id))
+             return toast.show({
+               variant: "warning",
+               message: `Agent not found: ${id}`,
+@@ -115,10 +131,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+           batch(() => {
+             const current = this.current()
+             if (!current) return
+-            let next = agents().findIndex((agent) => agent.id === current.id) + direction
+-            if (next < 0) next = agents().length - 1
+-            if (next >= agents().length) next = 0
+-            const value = agents()[next]
++            const list = this.list()
++            let next = list.findIndex((agent) => agent.id === current.id) + direction
++            if (next < 0) next = list.length - 1
++            if (next >= list.length) next = 0
++            const value = list[next]
+             this.set(value.id)
+           })
+         },
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 8d4310b2bc..833fa924e3 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -1257,7 +1257,10 @@ export function Session(props: {
+       id: "session.child.first",
+       group: "Session",
+       run: () => {
+-        if (composer.open || session()?.parentID) setComposer("open", false)
++        // Child sessions already render the inline steer composer, so the
++        // picker is opt-in there: toggle it open/closed like a main session
++        // instead of always closing it.
++        if (composer.open) setComposer("open", false)
+         else setComposer({ open: true, tab: "subagents" })
+         dialog.clear()
+       },
+@@ -1448,7 +1451,7 @@ export function Session(props: {
+               <Slot path="session.composer.top" input={{ sessionID: route.sessionID }} />
+               <Composer
+                 sessionID={route.sessionID}
+-                open={composer.open || (!!session()?.parentID && forms().length === 0)}
++                open={composer.open}
+                 defaultTab={composer.tab ?? (session()?.parentID ? "subagents" : undefined)}
+                 onClose={() => {
+                   const parent = session()?.parentID
+@@ -1462,7 +1465,7 @@ export function Session(props: {
+                 visibleTerminalID={props.visibleTerminalID}
+               />
+               <Switch>
+-                <Match when={composer.open || (!!session()?.parentID && forms().length === 0)}>{null}</Match>
++                <Match when={composer.open}>{null}</Match>
+                 <Match when={promptedPermissions().length > 0}>
+                   <Show when={promptedPermissions()[0]?.id} keyed>
+                     {(_) => {
+@@ -1498,6 +1501,10 @@ export function Session(props: {
+                     visible={true}
+                     ref={bind}
+                     muted={props.promptMuted}
++                    // Child sessions render this same Prompt as the inline steer
++                    // composer; label it accordingly. Parent/main behavior is
++                    // untouched (placeholders undefined => default copy).
++                    placeholders={session()?.parentID ? { normal: ["Steer this subagent…"] } : undefined}
+                     onSubmit={() => {
+                       toBottom()
+                     }}
+diff --git a/packages/tui/test/child-composer-steer.test.tsx b/packages/tui/test/child-composer-steer.test.tsx
+new file mode 100644
+index 0000000000..e2f3965324
+--- /dev/null
++++ b/packages/tui/test/child-composer-steer.test.tsx
+@@ -0,0 +1,163 @@
++import { expect, test } from "bun:test"
++import { createTestRenderer } from "@opentui/core/testing"
++import { Effect, FileSystem } from "effect"
++import { Global } from "@opencode/util/global"
++import { createEventStream, createFetch, directory, json } from "./fixture/tui-client"
++import { tmpdir } from "./fixture/fixture"
++
++/**
++ * Regression coverage for the child-session inline steer composer.
++ *
++ * Before the patch, viewing a child session force-opened the subagent Composer
++ * picker and rendered `{null}` instead of the host `<Prompt>`, so there was no
++ * free-text composer. After the patch:
++ *   - a child session renders the normal Prompt and it submits to the CHILD
++ *     (delivery defaults to "steer"), and
++ *   - a parent/main session is unchanged (default placeholder, submits to itself).
++ */
++
++const base = {
++  projectID: "project",
++  agent: "build",
++  model: { providerID: "demo", id: "model" },
++  location: { directory },
++  cost: 0,
++  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  time: { created: 0, updated: 0 },
++}
++const parent = { ...base, id: "ses_parent", title: "Parent session" }
++const child = { ...base, id: "ses_child", title: "Child session", parentID: parent.id, agent: "general" }
++
++type PromptCall = { sessionID: string; body: { text?: string; delivery?: string } }
++
++/** A colour reads as blue when the blue channel clearly dominates red/green. */
++function isBlue(color: { toInts(): [number, number, number, number] }) {
++  const [r, g, b, a] = color.toInts()
++  return a > 0 && b > r + 24 && b > g + 16
++}
++
++async function boot(sessionID: string) {
++  await using state = await tmpdir()
++  const setup = await createTestRenderer({ width: 100, height: 30, useThread: false, kittyKeyboard: true })
++  setup.renderer.start()
++  const ready = Promise.withResolvers<void>()
++  const promptSeen = Promise.withResolvers<PromptCall>()
++  const switched: string[] = []
++  const location = { directory, project: { id: "project", directory, canonical: directory } }
++  const calls = createFetch(async (url, request) => {
++    const sessionMatch = url.pathname.match(/^\/api\/session\/([^/]+)$/)
++    if (sessionMatch) {
++      const id = sessionMatch[1]
++      if (id === parent.id) return json({ data: parent })
++      if (id === child.id) return json({ data: child })
++    }
++    if (url.pathname === "/api/session") return json({ data: [parent, child], cursor: {} })
++    const promptMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/prompt$/)
++    if (promptMatch && request.method === "POST") {
++      const body = (await request.json()) as PromptCall["body"]
++      const call = { sessionID: promptMatch[1], body }
++      promptSeen.resolve(call)
++      return json({
++        data: {
++          id: (body as { id?: string }).id,
++          sessionID: promptMatch[1],
++          type: "user",
++          time: { created: 10 },
++          payload: { text: body.text },
++          delivery: body.delivery ?? "steer",
++        },
++      })
++    }
++    if (/^\/api\/session\/[^/]+\/message$/.test(url.pathname)) return json({ data: [], cursor: {} })
++    if (/^\/api\/session\/[^/]+\/(inbox|permission)$/.test(url.pathname)) return json({ data: [] })
++    const agentMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/agent$/)
++    if (agentMatch && request.method === "POST") {
++      switched.push(agentMatch[1])
++      return new Response(null, { status: 204 })
++    }
++    if (url.pathname === "/api/agent")
++      return json({
++        location,
++        data: [
++          { id: "build", name: "Build", mode: "primary", hidden: false, permissions: [] },
++          { id: "general", name: "General", mode: "subagent", hidden: false, permissions: [] },
++        ],
++      })
++    if (url.pathname === "/api/provider") return json({ location, data: [{ id: "demo", name: "Demo" }] })
++    if (url.pathname === "/api/model")
++      return json({ location, data: [{ id: "model", providerID: "demo", name: "Demo Model", variants: [] }] })
++    return undefined
++  }, createEventStream())
++  const server = Bun.serve({ port: 0, idleTimeout: 0, fetch: (request) => calls.fetch(request) })
++  const { run } = await import("../src/app")
++  const task = Effect.runPromise(
++    run({
++      app: { name: "test", version: "test", channel: "test" },
++      server: { endpoint: { url: server.url.toString() } },
++      config: { get: async () => ({ animations: false }), update: async () => ({}) },
++      packages: { prepare: async () => ({ directory: "" }) },
++      terminalHandoff: async () => ({ renderer: setup.renderer, mode: "dark", complete: ready.resolve }),
++      args: { sessionID },
++      log: () => {},
++    }).pipe(Effect.provide(Global.layerWith({ state: state.path })), Effect.provide(FileSystem.layerNoop({}))),
++  )
++  return { setup, ready, promptSeen, switched, task, server, state }
++}
++
++test("child session renders the inline steer composer and sends the typed text to the child as a steer", async () => {
++  const { setup, ready, promptSeen, switched, task, server } = await boot(child.id)
++  try {
++    await ready.promise
++    const frame = await setup.waitForFrame(
++      (value) => value.includes("Steer this subagent") && value.includes("Demo Model"),
++    )
++    expect(frame).toContain("Steer this subagent")
++    // The composer reflects the VIEWED CHILD's agent type, not the main agent's.
++    expect(frame).toContain("General")
++    expect(frame).not.toContain("Build")
++    // The whole composer box uses the distinct blue palette for subagents.
++    expect(setup.captureSpans().lines.flatMap((line) => line.spans).some((span) => isBlue(span.bg))).toBe(true)
++
++    await setup.mockInput.typeText("focus on the failing tests")
++    setup.mockInput.pressEnter()
++
++    const { sessionID, body } = await promptSeen.promise
++    expect(sessionID).toBe(child.id)
++    expect(body.text).toBe("focus on the failing tests")
++    expect(body.delivery).toBe("steer")
++    // Steering must not switch the child's agent to the primary selection.
++    expect(switched).toEqual([])
++  } finally {
++    setup.renderer.destroy()
++    await task
++    await server.stop()
++  }
++}, 60000)
++
++test("parent/main session keeps the default composer and submits to itself (no child placeholder)", async () => {
++  const { setup, ready, promptSeen, switched, task, server } = await boot(parent.id)
++  try {
++    await ready.promise
++    const frame = await setup.waitForFrame((value) => value.includes("Demo Model"))
++    // Main sessions must not pick up the child-only steer placeholder, and keep
++    // their own (primary) agent type.
++    expect(frame).not.toContain("Steer this subagent")
++    expect(frame).toContain("Build")
++    expect(frame).not.toContain("General")
++    // Main sessions keep the normal (non-blue) composer palette.
++    expect(setup.captureSpans().lines.flatMap((line) => line.spans).some((span) => isBlue(span.bg))).toBe(false)
++
++    await setup.mockInput.typeText("hello from main")
++    setup.mockInput.pressEnter()
++
++    const { sessionID, body } = await promptSeen.promise
++    expect(sessionID).toBe(parent.id)
++    expect(body.text).toBe("hello from main")
++    expect(body.delivery).toBe("steer")
++    expect(switched).toEqual([])
++  } finally {
++    setup.renderer.destroy()
++    await task
++    await server.stop()
++  }
++}, 60000)

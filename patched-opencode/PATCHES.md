@@ -14,6 +14,7 @@ What these patches actually do:
 4. **Abort cancels pending background jobs.** When a turn is interrupted, the session's pending background jobs are cancelled in addition to the session job itself, so aborting a waiting session actually clears the outstanding work.
 5. **Subagent background-completion fixes.** Subagent completion now runs the child to quiescence, waiting for its pending background notifications (`awaitBackground`) before finalizing the response, and restart recovery drains through the provided execution instance rather than the global `Session` service.
 6. **Generated client types and schema** gain the `waiting` status member, and extensive tests cover the new behavior.
+7. **Inline steer composer for child sessions** (`0003`). Viewing a child/subagent session now renders the normal host `<Prompt>` (the inline steer composer) instead of force-opening the `Composer` subagent picker and rendering `null`. The host `Prompt` submits to its own `props.sessionID` and defaults `delivery` to `"steer"`, so typed input is sent to the viewed child as a steer prompt. The composer's **agent type** also follows the viewed child's own agent (see `(c)`), so it neither displays the main agent's type nor switches the child's agent on submit, and the whole composer box uses a distinct **blue palette** while a subagent is being viewed. The picker stays reachable via `session.child.first` ("Toggle subagent picker", default `down`); main-session behavior is untouched.
 
 ---
 
@@ -43,7 +44,11 @@ b26f96ae47 feat(tui): surface waiting session status
 |-------|-------|----------|
 | `0001-remove-parentid-sidebar-gate.patch` | **1** | Sidebar gate removal in `session-frame.tsx` |
 | `0002-session-waiting-status-tick-fix.patch` | **19** | Waiting status feature: schema/client/core/app/tui/plugin + tests |
-| **Total** | **20** | Matches the branch diff exactly |
+| `0003-child-composer-steer.patch` | **5** | Child-session inline steer composer + agent type follows the viewed child + blue composer palette + regression test |
+| **0001+0002 total** | **20** | Matches the `c212f31561` branch diff exactly |
+| **0001+0002+0003 total** | **25** | Adds the inline steer composer, child agent type, and blue palette on top |
+
+> `0003` is **additive**: it is not part of the `c212f31561` waiting-status branch, so the tree-hash proof below still describes `0001+0002` only. `0003` applies cleanly on top of that tree and does not touch any file from `0001`/`0002`.
 
 > **Scope & accuracy note:** An earlier README implied the patches covered the whole branch while they did in fact only cover part of it. The regenerated patch set now covers **all 20 files** in the branch diff: `0002` contains 19 files and `0001` contains the remaining 1. This is verified by counting `diff --git` headers and by the tree-hash check in "How to apply".
 
@@ -747,6 +752,191 @@ AFTER (added test, abridged)
 
 ---
 
+## (c) Child inline steer composer
+
+### `packages/tui/src/routes/session/index.tsx` — patch **0003**
+
+The host hides its own `<Prompt>` for child sessions and force-opens the tabbed `Composer` subagent picker instead, so there is no free-text composer while viewing a subagent. Because `Prompt.submit()` already defaults `delivery` to `"steer"` and targets `props.sessionID`, the fix is to stop suppressing the Prompt for child sessions and stop force-opening the picker.
+
+**Hunk 1** — make the subagent-picker toggle opt-in on child sessions (it previously always closed on a child, which would strand navigation once the picker is no longer forced open).
+
+```
+BEFORE
+      run: () => {
+        if (composer.open || session()?.parentID) setComposer("open", false)
+        else setComposer({ open: true, tab: "subagents" })
+        dialog.clear()
+      },
+
+AFTER
+      run: () => {
+        // Child sessions already render the inline steer composer, so the
+        // picker is opt-in there: toggle it open/closed like a main session
+        // instead of always closing it.
+        if (composer.open) setComposer("open", false)
+        else setComposer({ open: true, tab: "subagents" })
+        dialog.clear()
+      },
+```
+
+**Hunk 2** — only force-open the picker when the user asked for it.
+
+```
+BEFORE
+              <Composer
+                sessionID={route.sessionID}
+                open={composer.open || (!!session()?.parentID && forms().length === 0)}
+
+AFTER
+              <Composer
+                sessionID={route.sessionID}
+                open={composer.open}
+```
+
+**Hunk 3** — render the host Prompt for child sessions (instead of the `null` placeholder).
+
+```
+BEFORE
+                <Match when={composer.open || (!!session()?.parentID && forms().length === 0)}>{null}</Match>
+
+AFTER
+                <Match when={composer.open}>{null}</Match>
+```
+
+**Hunk 4** — label the child composer so the steer affordance is discoverable (main sessions pass no `placeholders`, so they are unchanged).
+
+```
+BEFORE
+                    muted={props.promptMuted}
+                    onSubmit={() => {
+
+AFTER
+                    muted={props.promptMuted}
+                    // Child sessions render this same Prompt as the inline steer
+                    // composer; label it accordingly. Parent/main behavior is
+                    // untouched (placeholders undefined => default copy).
+                    placeholders={session()?.parentID ? { normal: ["Steer this subagent…"] } : undefined}
+                    onSubmit={() => {
+```
+
+**Hunk 5** — `packages/tui/src/context/local.tsx`: resolve the viewed child's own agent, and make it the only selectable/current agent. `createAgent()` gains a memo:
+
+```
+AFTER (added after `visibleAgents`)
+      // A child/subagent session runs its own agent, which is frequently a
+      // `mode: "subagent"` agent deliberately absent from the primary `agents()`
+      // list. The composer must reflect that agent: otherwise the footer shows
+      // the main agent's type, and `prepareAgent` would switch the child's agent
+      // to the primary selection when a steer is submitted.
+      const viewedChildAgent = createMemo(() => {
+        if (route.data.type !== "session") return
+        const session = data.session.get(route.data.sessionID)
+        if (!session?.parentID || !session.agent) return
+        return (data.location.agent.list(location.ref) ?? []).find((item) => item.id === session.agent)
+      })
+```
+
+```
+BEFORE
+        list() {
+          return agents()
+        },
+        current() {
+          const draft = ...
+AFTER
+        list() {
+          // While viewing a child/subagent, that session's own agent is the only
+          // selectable one: its agent is fixed by the subagent it represents.
+          const child = viewedChildAgent()
+          return child ? [child] : agents()
+        },
+        current() {
+          const child = viewedChildAgent()
+          if (child) return child
+          const draft = ...
+```
+
+`set()`/`move()` now validate/iterate `this.list()` instead of the primary-only `agents()` (identical for main sessions):
+
+```
+BEFORE
+        set(id: string) {
+          if (!agents().some((agent) => agent.id === id))
+AFTER
+        set(id: string) {
+          if (!this.list().some((agent) => agent.id === id))
+```
+
+```
+BEFORE
+            let next = agents().findIndex((agent) => agent.id === current.id) + direction
+            if (next < 0) next = agents().length - 1
+            if (next >= agents().length) next = 0
+            const value = agents()[next]
+AFTER
+            const list = this.list()
+            let next = list.findIndex((agent) => agent.id === current.id) + direction
+            if (next < 0) next = list.length - 1
+            if (next >= list.length) next = 0
+            const value = list[next]
+```
+
+**Hunk 6** — `packages/tui/src/app.tsx`: do not carry a subagent agent into a new session (`session.new` / `session.clear`, both call sites).
+
+```
+BEFORE
+          if (agent) local.agent.set(agent.id)
+AFTER
+          if (agent && agent.mode !== "subagent") local.agent.set(agent.id)
+```
+
+**Hunk 7** — `packages/tui/src/component/prompt/index.tsx`: render the whole composer box in a distinct blue palette while viewing a subagent. A fixed blue overlay is blended over the theme's own composer tokens.
+
+```
+AFTER (module scope, near the top)
+const SUBAGENT_COMPOSER_BLUE = RGBA.fromHex("#3b82f6")
+const SUBAGENT_COMPOSER_BG_ALPHA = 0.4
+const SUBAGENT_COMPOSER_BORDER_ALPHA = 0.9
+const SUBAGENT_COMPOSER_PLACEHOLDER_ALPHA = 0.6
+```
+
+```
+BEFORE
+  const promptBg = createMemo(() => theme.decrease(theme.background.raised.base))
+AFTER
+  const subagentComposer = createMemo(() => !!props.sessionID && !!data.session.get(props.sessionID)?.parentID)
+  const promptBg = createMemo(() => {
+    const base = theme.decrease(theme.background.raised.base)
+    return subagentComposer() ? tint(base, SUBAGENT_COMPOSER_BLUE, SUBAGENT_COMPOSER_BG_ALPHA) : base
+  })
+  const promptBorder = createMemo(() =>
+    subagentComposer()
+      ? tint(theme.border.base, SUBAGENT_COMPOSER_BLUE, SUBAGENT_COMPOSER_BORDER_ALPHA)
+      : borderHighlight(),
+  )
+  const promptPlaceholder = createMemo(() =>
+    subagentComposer()
+      ? tint(theme.text.muted, SUBAGENT_COMPOSER_BLUE, SUBAGENT_COMPOSER_PLACEHOLDER_ALPHA)
+      : theme.text.muted,
+  )
+```
+
+Both composer borders (`borderColor={borderHighlight()}` → `borderColor={promptBorder()}`) and the input placeholder (`theme.text.muted` → `promptPlaceholder()`) switch to the blue-aware values; the box background already reads `promptBg()`.
+
+**Palette rationale:** `#3b82f6` is a neutral, vivid blue. Blending it over the theme's own tokens keeps the palette legible in both modes: the background retains the theme's lightness (so `theme.text.base` stays high-contrast), the border is almost pure blue, and the placeholder is a softer blue. The theme's TypeScript type exposes only semantic hues (`accent`/`interactive`/`neutral`), so a fixed blue overlay is used instead of a named `hue.blue` token (which exists at runtime but is untyped).
+
+**Agent-type root cause:** `local.agent.current()` searched only `agents()`, which filters out `mode: "subagent"`. A child's own agent (e.g. `general`) therefore never resolved and `current()` fell back to the first primary agent. That drove both the footer label (`promptDisplay.agentLabel`) and `prepareAgent`'s `switchAgent` call (`component/prompt/index.tsx`), so submitting a steer could silently **switch the child's agent to the main agent**.
+
+**Regression test** — `packages/tui/test/child-composer-steer.test.tsx` mounts the real app on a child and on a parent session and asserts:
+- the child frame shows the `Steer this subagent` placeholder **and the child's own agent type (`General`)**, not the main agent (`Build`), the captured spans contain a **blue-dominant composer background**, and typing + Enter POSTs `{ text, delivery: "steer" }` to `/api/session/<child>/prompt` **without** any `/api/session/<child>/agent` switch;
+- the parent frame shows its own agent (`Build`, never `General`), has **no** blue-dominant composer background, does **not** show the child placeholder, and typing + Enter POSTs to the parent.
+
+**Rationale:** no `Prompt` component change is needed — it already sends to `props.sessionID` with `delivery` defaulting to `"steer"` (`packages/tui/src/component/prompt/index.tsx`); the child route simply never rendered it. Fixing `local.agent.current()` makes the composer reflect the child's own agent for the label/model **and** makes `prepareAgent` a no-op for the child. The picker remains reachable (default `down`), so normal child navigation is preserved.
+
+**Known tradeoff (documented, not fixed):** while the child composer is focused, `session.parent` (`up`) and `session.child.first` (`down`) remain bound in the lowest keymap layer, so arrow up/down still navigate rather than move the editing cursor. This intentionally preserves navigation; a fallthrough-while-editor-has-text guard (as used by the `strayge/opencode` fork) is a possible follow-up, not included here (YAGNI).
+
+---
+
 ## How to apply
 
 Apply against a **clean upstream v2.0.23 checkout** (`0fd7e2829449b052abf0078666669302923d77af`), in order:
@@ -758,9 +948,10 @@ git checkout 0fd7e2829449b052abf0078666669302923d77af   # tag v2.0.23
 
 git apply /path/to/patches/0001-remove-parentid-sidebar-gate.patch
 git apply /path/to/patches/0002-session-waiting-status-tick-fix.patch
+git apply /path/to/patches/0003-child-composer-steer.patch
 ```
 
-Both patches apply cleanly (all 20 files, no fuzz, no rejects).
+`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (2 files: the route change plus its regression test).
 
 **Reproduction proof.** After applying both patches and staging the result, the resulting Git tree is identical to the rebased head's tree:
 

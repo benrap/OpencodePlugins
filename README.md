@@ -12,7 +12,7 @@ sourced from this repo.
 | [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
 | [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
 | [`always-background`](./always-background) | server | Forces background execution for every tool call **except** `shell` and `subagent` via the `execute.before` hook; the exclude list is configurable. |
-| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build from source (sidebar `parentID` gate removal, waiting/tick/abort fix), with cumulative patches and switch/revert scripts. |
+| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build from source (sidebar `parentID` gate removal, waiting/tick/abort fix, and a child-session inline steer composer), with cumulative patches and switch/revert scripts. |
 | [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `subagent-status`, `subagent-abort`, `message_agent`, `question`, and `skill` tools are allowed, everything else denied. |
 
 ## Installation instructions (for AI agents)

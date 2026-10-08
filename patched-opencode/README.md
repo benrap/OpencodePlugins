@@ -33,22 +33,24 @@ This is patched OpenCode built from upstream **v2.0.23** with the changes docume
 - A **waiting** session status: while a turn's background work (shell jobs, nested subagents) is still outstanding, `Execution.Succeeded` is withheld and the session reports `waiting` instead of flashing a spurious "done" tick.
 - The TUI treats `waiting` as busy (running), shows a "waiting for background work…" indicator, and does not render the completion tick until the work truly finishes.
 - The **subagent sidebar gate** is removed, so child/subagent sessions render in the sidebar tree regardless of their `parentID`.
+- **Inline steer composer for subagent sessions.** Viewing a child/subagent session now renders the normal host message composer; typing in it submits the text to the viewed child as a **steer** prompt (the host `Prompt` already defaults `delivery` to `"steer"` and targets its `sessionID`). The composer's **agent type** reflects that subagent's own agent (not the main agent's), the whole composer box uses a distinct **blue palette**, so the steer is associated with the right agent type and it is obvious who is being spoken to. The subagent picker is no longer force-opened for children — it stays reachable via the "Toggle subagent picker" command (`session.child.first`, default `down`). Main-session behavior is unchanged.
 - Aborting a session also cancels its pending background jobs, and subagent completion now waits for child background work before finalizing its response.
 
-For the exact per-file diff (all 20 changed files, before/after hunks, grouping, and how to apply the patches to a clean checkout), see **[PATCHES.md](./PATCHES.md)**.
+For the exact per-file diff (the 20 changed files from `0001`+`0002`, plus the `0003` route change and its test, before/after hunks, grouping, and how to apply the patches to a clean checkout), see **[PATCHES.md](./PATCHES.md)**.
 
 ---
 
 ## Patch files
 
-Two patch files are provided:
+Three patch files are provided:
 
 | Patch | Contents |
 |-------|----------|
 | `patches/0001-remove-parentid-sidebar-gate.patch` | Removes the `parentID` sidebar gate in `packages/tui/src/component/session-frame.tsx`. |
 | `patches/0002-session-waiting-status-tick-fix.patch` | The waiting-status feature and completion-tick fix across schema/client/core/app/tui/plugin, plus tests (19 files). |
+| `patches/0003-child-composer-steer.patch` | Makes a child session's host composer the inline steer composer (render the host `Prompt` instead of force-opening the subagent picker), makes the composer's agent type follow the viewed child's own agent, and gives the composer a distinct blue palette while viewing a subagent, plus a regression test (`packages/tui/src/routes/session/index.tsx`, `packages/tui/src/context/local.tsx`, `packages/tui/src/app.tsx`, `packages/tui/src/component/prompt/index.tsx`, `packages/tui/test/child-composer-steer.test.tsx`). |
 
-Both apply cleanly to a clean upstream **v2.0.23** checkout, and applying both reproduces the source tree this binary was built from. See [PATCHES.md](./PATCHES.md) for the exact `git apply` commands and the verified tree hash.
+Apply them **in order** to a clean upstream **v2.0.23** checkout (`git apply 0001 0002 0003`); applying all three reproduces the source tree this binary was built from. See [PATCHES.md](./PATCHES.md) for the exact `git apply` commands and the verified tree hash.
 
 ---
 
