@@ -92,7 +92,7 @@ Enforced in `subagent-view.ts` and unit-tested:
 Add the package path to `opencode.jsonc`:
 
 ```jsonc
-{ "plugins": [{ "package": "C:\\Users\\benrap\\CodeProjects\\OpencodePlugins\\subagent-abort" }] }
+{ "plugins": [{ "package": "<repo-root>\\subagent-abort" }] }
 ```
 
 ## Tests
