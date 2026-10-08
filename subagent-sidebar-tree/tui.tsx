@@ -567,8 +567,13 @@ function SidebarSubagents(props: {
     if (isPrimaryMouseButton(event)) setExpanded(false)
   }
 
+  // The MAIN/ROOT row must render even when it is the only entry. Show the tree
+  // whenever the root session exists OR there are descendant rows (the latter
+  // preserves rendering if the root record is momentarily unavailable).
+  const hasTree = () => nodes().length > 0 || rootSession() !== undefined
+
   return (
-    <Show when={nodes().length > 0}>
+    <Show when={hasTree()}>
       <box
         flexDirection="column"
         paddingBottom={1}

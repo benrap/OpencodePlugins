@@ -57,8 +57,16 @@ const SESSIONS: MockSession[] = [
   { id: "ses_grand", parentID: "ses_child", agent: "plan", title: "Grandchild", time: { updated: 50 } },
 ]
 
-function mockContext(currentSessionID: string): Context {
-  const byID = new Map(SESSIONS.map((session) => [session.id, session]))
+/**
+ * The "only the MAIN/root agent, no subagents" case. The root must still render
+ * as the sole tree row.
+ */
+const ONLY_ROOT_SESSIONS: MockSession[] = [
+  { id: "ses_root", agent: "build", title: "Root", time: { updated: 100 } },
+]
+
+function mockContext(currentSessionID: string, sessions: MockSession[] = SESSIONS): Context {
+  const byID = new Map(sessions.map((session) => [session.id, session]))
   return {
     theme: {
       background: { base: raised, raised: { base: raised }, default: raised, surface: { offset: raised } },
@@ -78,9 +86,9 @@ function mockContext(currentSessionID: string): Context {
     },
     data: {
       session: {
-        list: () => SESSIONS,
+        list: () => sessions,
         get: (id: string) => byID.get(id),
-        root: () => "ses_root",
+        root: () => sessions.find((session) => !session.parentID)?.id ?? "ses_root",
         status: () => "running",
         sync: async () => {},
         message: { list: () => [], sync: async () => {} },
@@ -159,8 +167,8 @@ function Harness(props: {
   )
 }
 
-async function render(sessionID: string) {
-  const context = mockContext(sessionID)
+async function render(sessionID: string, sessions: MockSession[] = SESSIONS) {
+  const context = mockContext(sessionID, sessions)
   const syncState = { children: new Set<string>(), messages: new Set<string>() }
   const app = await testRender(
     () => <Harness context={context} sessionID={sessionID} syncState={syncState} />,
@@ -261,6 +269,36 @@ test("subagent tree renders in the right pane for a subagent session", async () 
     expect(panel.x + panel.width).toBeLessThanOrEqual(right.x + right.width)
     expect(panel.y).toBeGreaterThanOrEqual(right.y)
     expect(panel.y + panel.height).toBeLessThanOrEqual(right.y + right.height)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+/**
+ * The MAIN/ROOT agent row must ALWAYS be shown in the right-pane panel, even
+ * when it is the ONLY entry. Before the fix the tree was gated behind
+ * `nodes().length > 0` (descendant rows only), so a session with no child
+ * subagents rendered no root row here either.
+ */
+test("right-pane panel shows the root/MAIN row when it is the only entry (no subagents)", async () => {
+  const app = await render("ses_root", ONLY_ROOT_SESSIONS)
+  try {
+    const root = app.renderer.root
+    const right = root.findDescendantById("right-pane")!
+    const panel = root.findDescendantById("subagent-panel")!
+    const frame = app.captureCharFrame()
+    // Visible output in the test log.
+    console.log("\n===== right-pane frame (no subagents: only MAIN/ROOT row) =====")
+    console.log(frame)
+
+    expect(panel).toBeDefined()
+    expect(frame).toContain("Subagent tree")
+    expect(frame).toContain("build")
+    expect(frame).not.toContain("SUBAGENTS (")
+    expect(frame).not.toContain("explore")
+    expect(frame).not.toContain("general")
+    expect(frame).not.toContain("plan")
+    expect(columnOf(frame, "build")).toBeGreaterThanOrEqual(right.x)
   } finally {
     app.renderer.destroy()
   }
