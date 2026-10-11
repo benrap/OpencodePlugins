@@ -1,6 +1,6 @@
 # PATCHES.md — `opencode-patched` vs upstream OpenCode v2.0.23
 
-Exact, per-file record of what this patch set changes relative to upstream **v2.0.23**. Nothing here is aspirational: the hunks below are the actual patch contents, and `0001`+`0002` together reproduce the `c212f31561` rebased source tree byte-for-byte (verified tree hash below), with `0003`, `0004`, and `0005` applying additively on top.
+Exact, per-file record of what this patch set changes relative to upstream **v2.0.23**. Nothing here is aspirational: the hunks below are the actual patch contents, and `0001`+`0002` together reproduce the `c212f31561` rebased source tree byte-for-byte (verified tree hash below), with `0003`, `0004`, `0005`, and `0006` applying additively on top.
 
 ---
 
@@ -17,6 +17,7 @@ What these patches actually do:
 7. **Inline steer composer for child sessions** (`0003`). Viewing a child/subagent session now renders the normal host `<Prompt>` (the inline steer composer) instead of force-opening the `Composer` subagent picker and rendering `null`. The host `Prompt` submits to its own `props.sessionID` and defaults `delivery` to `"steer"`, so typed input is sent to the viewed child as a steer prompt. The composer's **agent type** also follows the viewed child's own agent (see `(c)`), so it neither displays the main agent's type nor switches the child's agent on submit, and the whole composer box uses a distinct **blue palette** while a subagent is being viewed. The picker stays reachable via `session.child.first` ("Toggle subagent picker", default `down`); main-session behavior is untouched.
 8. **Aborting a `waiting` session now actually stops it** (`0004`). A session whose turn settled with outstanding durable background work sits in `waiting` with **no active execution** for the coordinator to interrupt, so an abort was previously a no-op. `SessionExecution.interrupt` now handles that case: when there is no live execution but the session still owns outstanding durable background work, it cancels that work, clears its durable recovery marker (so the session is no longer `awaiting`), and publishes the `session.execution.interrupted` terminal so clients leave `waiting`. A genuinely idle session (no outstanding background work) remains a `false` no-op. Effect: `/abort` and the child-composer Ctrl+D now genuinely stop a waiting subagent (its job's process scope is closed, which reaps the underlying shell process). Touches only `packages/core`; applies on top of `0001`–`0003` and is independent of the `0003` TUI change. `0005` then makes this waiting-branch cancellation **opt-in**: it now runs only when the interrupt is asked for with `cancelBackground: true`.
 9. **`Esc Esc` is foreground-only; `cancelBackground` restores full-stop** (`0005`). `session.interrupt` gains an optional `cancelBackground` flag (default `false`). By default an interrupt now stops only the **foreground** turn: interrupting a live turn does **not** cancel the session's durable background jobs, and interrupting a `waiting` session (no active execution) is a **no-op**. This is what `Esc Esc` needs: the user asked to stop the agent in front of them, not to tear down unrelated background tasks. Passing `cancelBackground: true` restores the old `0002`/`0004` behavior — cancel the session's outstanding background jobs, including settling a `waiting` session with the interrupted terminal. Internal teardown callers that must not leave orphaned background work (`Session.remove`, and the inactivity reaper in `location-activity.ts`) now pass `cancelBackground: true` explicitly. Touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests; applies on top of `0001`–`0004` and contains no `packages/tui` hunks.
+10. **A cancelled job's notice does not revive its owner** (`0006`). Cancelling a background job or a subagent still admits its terminal notice into the owner's context, but the notice now carries `resume: false` when `status === "cancelled"` — set in `tool/plugin/shell.ts` (`notifyWhenDone`) and `session/subagent-completion.ts` (`deliver`). Previously the notice was delivered with the default `resume: true`, so aborting a subagent woke the aborted session into a brand-new model turn (the subagent "dealt with the abortion") and likewise revived the parent. With `0006`, only `succeeded`/`failed`/`error` completions resume the owner; a cancellation is admitted for context but is non-reviving, so abort terminates cleanly — no follow-up turn, no focus change, no parent revival. It also closes the restart-recovery path, where a cancelled subagent's durable notice would otherwise resume the parent after a restart. Touches only `packages/core`; applies on top of `0001`–`0005`.
 
 ---
 
@@ -49,16 +50,20 @@ b26f96ae47 feat(tui): surface waiting session status
 | `0003-child-composer-steer.patch` | **5** | Child-session inline steer composer + agent type follows the viewed child + blue composer palette + regression test |
 | `0004-abort-waiting-session.patch` | **2** | Abort of a `waiting` session cancels its outstanding durable background work and publishes the interrupted terminal (`packages/core` only) |
 | `0005-interrupt-foreground-only.patch` | **13** | Foreground-only interrupt: `session.interrupt` gains `cancelBackground` (default `false`) in protocol/server/core + 4 generated client files + 3 core tests |
+| `0006-abort-does-not-resume.patch` | **4** | Cancelled job/subagent notices are admitted with `resume: false`, so abort does not revive the owner (`packages/core` only) |
 | **0001+0002 total** | **20** | Matches the `c212f31561` branch diff exactly |
 | **0001+0002+0003 total** | **25** | Adds the inline steer composer, child agent type, and blue palette on top |
 | **0001+0002+0003+0004 total** | **27** | Adds the waiting-session abort fix on top |
 | **0001+0002+0003+0004+0005 total** | **40** | Adds the foreground-only interrupt on top (per-patch sum; `0005` overlaps a few `0002`/`0004` files — see the note) |
+| **0001+0002+0003+0004+0005+0006 total** | **44** | Adds the non-reviving cancellation on top (per-patch sum; `0006` overlaps a few `0002`/`0005` files — see the note) |
 
 > `0003` is **additive**: it is not part of the `c212f31561` waiting-status branch, so the tree-hash proof below still describes `0001+0002` only. `0003` applies cleanly on top of that tree and does not touch any file from `0001`/`0002`.
 
 > `0004` is **additive** as well: it applies cleanly on top of `0001`–`0003`, touches only `packages/core` (never the `0003` TUI files), and is likewise **not** part of the `c212f31561` tree-hash proof below.
 
 > `0005` is **additive** too: it applies cleanly on top of `0001`–`0004`, touches only `packages/protocol`, `packages/server`, `packages/core`, and the generated client (no `packages/tui` hunks, so it does not modify the `0003` TUI files), and is likewise **not** part of the `c212f31561` tree-hash proof below. Its 13 files overlap three earlier patches (`packages/core/src/session/execution.ts` also in `0002`/`0004`, `packages/client/src/promise/generated/types.ts` also in `0002`, and `packages/core/test/session-execution.test.ts` also in `0002`/`0004`), so the cumulative total above is the sum of per-patch counts, not a distinct-file count.
+
+> `0006` is **additive** too: it applies cleanly on top of `0001`–`0005`, touches only `packages/core` (`session/subagent-completion.ts`, `tool/plugin/shell.ts`, and the tests `session-execution.test.ts` + `tool-shell.test.ts`), and is likewise **not** part of the `c212f31561` tree-hash proof below. Two of its files overlap earlier patches (`packages/core/src/session/subagent-completion.ts` also in `0002`, and `packages/core/test/session-execution.test.ts` also in `0002`/`0004`/`0005`), so the cumulative total above is the sum of per-patch counts, not a distinct-file count.
 
 > **Scope & accuracy note:** An earlier README implied the patches covered the whole branch while they did in fact only cover part of it. The regenerated patch set now covers **all 20 files** in the branch diff: `0002` contains 19 files and `0001` contains the remaining 1. This is verified by counting `diff --git` headers and by the tree-hash check in "How to apply".
 
@@ -1247,6 +1252,58 @@ Four generated files keep the typed client in sync with the new query parameter:
 
 ---
 
+## (f) Cancelled jobs do not revive their owner
+
+### `packages/core/src/session/subagent-completion.ts` — patch **0006**
+
+**Hunk 1** — a cancelled child's notice is admitted with `resume: false`.
+
+```
+BEFORE
+    ...(input.resume === false ? { resume: false } : {}),
+
+AFTER
+    // A cancelled child is admitted for context, but only a real completion or failure
+    // should revive the parent; cancellation is the parent's own abort taking effect.
+    ...(input.resume === false || input.status === "cancelled" ? { resume: false } : {}),
+```
+
+**Rationale:** when a subagent is aborted, its terminal notice is still admitted into the parent's inbox for context, but it must not resume the parent — the cancellation is the parent's own abort taking effect, so reviving it into a new turn is wrong.
+
+---
+
+### `packages/core/src/tool/plugin/shell.ts` — patch **0006**
+
+**Hunk 1** — a cancelled background job's notice is admitted with `resume: false`.
+
+```
+BEFORE
+          ...(info.notificationID ? { id: info.notificationID } : {}),
+          sessionID,
+          description: command,
+
+AFTER
+          ...(info.notificationID ? { id: info.notificationID } : {}),
+          sessionID,
+          description: command,
+          // A cancelled job's notice is still admitted, but it must not revive an idle
+          // owner: only a real completion (or failure) is worth a new model turn.
+          ...(info.status === "cancelled" ? { resume: false } : {}),
+```
+
+**Rationale:** `notifyWhenDone` delivered a cancelled job's notice with the default `resume: true`, so cancelling a background shell job woke the idle owner into a new turn. Cancellation now admits the notice without reviving the owner.
+
+---
+
+### Tests — patch **0006**
+
+- `packages/core/test/session-execution.test.ts` — imports `SubagentCompletion`, retitles and re-asserts the user-cancelled background child test (`drained` is now `[]`: the cancelled notice is admitted for context but does not revive the parent), and adds a test that `SubagentCompletion.deliver` with `status: "cancelled"` wakes no one while a `status: "completed"` deliver still wakes the parent.
+- `packages/core/test/tool-shell.test.ts` — the harness execution layer's `wake` now records resumed owners (`wakes`), and two tests pin the behavior: a cancelled background shell is admitted (`state: "cancelled"`) with **no** wake, while a completed background shell still wakes the owner.
+
+**Rationale:** pins both halves — a cancellation is admitted but non-reviving, while a real completion still resumes the owner.
+
+---
+
 ## How to apply
 
 Apply against a **clean upstream v2.0.23 checkout** (`0fd7e2829449b052abf0078666669302923d77af`), in order:
@@ -1261,9 +1318,10 @@ git apply /path/to/patches/0002-session-waiting-status-tick-fix.patch
 git apply /path/to/patches/0003-child-composer-steer.patch
 git apply /path/to/patches/0004-abort-waiting-session.patch
 git apply /path/to/patches/0005-interrupt-foreground-only.patch
+git apply /path/to/patches/0006-abort-does-not-resume.patch
 ```
 
-`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (the route/context/app/prompt changes plus its regression test), `0004` applies cleanly on top of that, and `0005` applies cleanly on top of `0001`–`0004`. `0004` touches only `packages/core` (`execution.ts` plus its test), so — like `0003` — it is additive and does not modify any `0001`/`0002` file or the `0003` TUI files. `0005` touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests — it contains no `packages/tui` hunks, so it too leaves the `0003` TUI changes untouched.
+`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (the route/context/app/prompt changes plus its regression test), `0004` applies cleanly on top of that, and `0005` applies cleanly on top of `0001`–`0004`. `0004` touches only `packages/core` (`execution.ts` plus its test), so — like `0003` — it is additive and does not modify any `0001`/`0002` file or the `0003` TUI files. `0005` touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests — it contains no `packages/tui` hunks, so it too leaves the `0003` TUI changes untouched. `0006` applies cleanly on top of `0001`–`0005` and touches only `packages/core` (`session/subagent-completion.ts`, `tool/plugin/shell.ts`, and the two tests `session-execution.test.ts` + `tool-shell.test.ts`), so it too is additive.
 
 **Reproduction proof.** After applying `0001`+`0002` and staging the result, the resulting Git tree is identical to the rebased head's tree:
 

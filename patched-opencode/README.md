@@ -1,6 +1,6 @@
 # opencode-patched
 
-A runnable **Windows x64** build of OpenCode based on upstream v2.0.23 (tag `v2.0.23`, commit `0fd7e2829449b052abf0078666669302923d77af`), plus a small patch set that adds a session **waiting** status, removes the subagent sidebar gate, and makes the default interrupt **foreground-only**.
+A runnable **Windows x64** build of OpenCode based on upstream v2.0.23 (tag `v2.0.23`, commit `0fd7e2829449b052abf0078666669302923d77af`), plus a small patch set that adds a session **waiting** status, removes the subagent sidebar gate, makes the default interrupt **foreground-only**, and makes abort terminate cleanly (a cancelled job no longer revives its owner).
 
 ---
 
@@ -37,14 +37,15 @@ This is patched OpenCode built from upstream **v2.0.23** with the changes docume
 - Aborting a session can also cancel its pending background jobs — but only when the interrupt asks for it with `cancelBackground: true` (see `0005`); a default interrupt is foreground-only. Subagent completion now waits for child background work before finalizing its response.
 - **Aborting a `waiting` session now actually stops it** (`0004`): a subagent that has settled its turn with outstanding durable background work sits in `waiting` with no live execution to interrupt, so its abort used to be a no-op. `SessionExecution.interrupt` now cancels that background work, clears its durable recovery marker, and publishes the interrupted terminal, so the child-composer Ctrl+D genuinely stops the waiting subagent. `0005` makes this cancellation opt-in via `cancelBackground: true`.
 - **`Esc Esc` is foreground-only** (`0005`): `session.interrupt` gains an optional `cancelBackground` flag (default `false`). By default, interrupting stops only the **foreground** turn — it does **not** cancel the session's durable background jobs — and interrupting a `waiting` session (no active execution) is a **no-op**. This is what `Esc Esc` needs: stop the agent in front of you without touching background tasks. Passing `cancelBackground: true` restores the full-stop behavior (cancel outstanding background jobs, including settling a `waiting` session). Internal teardown callers that must not orphan background work (`Session.remove`, the inactivity reaper) pass `cancelBackground: true`.
+- **Aborting a subagent stops it cleanly — no new turn** (`0006`): a cancelled background job or subagent still admits its terminal notice into the owner's context, but the notice now carries `resume: false` when `status === "cancelled"` (in `tool/plugin/shell.ts` `notifyWhenDone` and `session/subagent-completion.ts` `deliver`). Previously that notice was delivered with the default `resume: true`, so aborting a subagent woke the aborted session into a brand-new model turn (the subagent "dealt with the abortion") and revived the parent too. Now only `succeeded`/`failed`/`error` completions resume the owner, so an abort terminates the subagent cleanly — no follow-up turn, no focus change, no parent revival — and the restart-recovery path for a cancelled subagent is closed as well.
 
-For the exact per-file diff (the 20 changed files from `0001`+`0002`, the `0003` inline-steer-composer change and its test, the `0004` waiting-abort change and its test, and the `0005` foreground-only-interrupt change and its tests — before/after hunks, grouping, and how to apply the patches to a clean checkout), see **[PATCHES.md](./PATCHES.md)**.
+For the exact per-file diff (the 20 changed files from `0001`+`0002`, the `0003` inline-steer-composer change and its test, the `0004` waiting-abort change and its test, the `0005` foreground-only-interrupt change and its tests, and the `0006` non-reviving-cancellation change and its tests — before/after hunks, grouping, and how to apply the patches to a clean checkout), see **[PATCHES.md](./PATCHES.md)**.
 
 ---
 
 ## Patch files
 
-Five patch files are provided:
+Six patch files are provided:
 
 | Patch | Contents |
 |-------|----------|
@@ -53,8 +54,9 @@ Five patch files are provided:
 | `patches/0003-child-composer-steer.patch` | Makes a child session's host composer the inline steer composer (render the host `Prompt` instead of force-opening the subagent picker), makes the composer's agent type follow the viewed child's own agent, and gives the composer a distinct blue palette while viewing a subagent, plus a regression test (`packages/tui/src/routes/session/index.tsx`, `packages/tui/src/context/local.tsx`, `packages/tui/src/app.tsx`, `packages/tui/src/component/prompt/index.tsx`, `packages/tui/test/child-composer-steer.test.tsx`). |
 | `patches/0004-abort-waiting-session.patch` | Makes aborting a `waiting` session (one whose turn settled with outstanding durable background work and so has no live execution) cancel that background work, clear its durable recovery marker, and publish the interrupted terminal, plus a regression test (`packages/core/src/session/execution.ts`, `packages/core/test/session-execution.test.ts`). `0005` makes this cancellation opt-in via `cancelBackground: true`. |
 | `patches/0005-interrupt-foreground-only.patch` | Adds `cancelBackground` (default `false`) to `session.interrupt`, making the default interrupt **foreground-only**: a live foreground turn stops but the session's durable background jobs keep running, and interrupting a `waiting` session is a no-op. `cancelBackground: true` restores the full-stop behavior; `Session.remove` and the inactivity reaper opt in. Touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests. |
+| `patches/0006-abort-does-not-resume.patch` | Makes a **cancelled** job's/subagent's notice non-reviving: `resume: false` when `status === "cancelled"` in `packages/core/src/tool/plugin/shell.ts` (`notifyWhenDone`) and `packages/core/src/session/subagent-completion.ts` (`deliver`). Cancellation is still admitted for context, but it no longer wakes the owner into a new turn; normal `succeeded`/`failed`/`error` completions still resume. Touches only `packages/core` (two sources + two tests). |
 
-Apply them **in order** to a clean upstream **v2.0.23** checkout (`git apply 0001 0002 0003 0004 0005`); applying all five reproduces the full patched source tree (`0001`+`0002` are the verified rebased tree; `0003`, `0004`, and `0005` are additive on top and touch only `packages/tui`, `packages/core`, and `packages/{protocol,server,core,client}` respectively). See [PATCHES.md](./PATCHES.md) for the exact `git apply` commands and the verified tree hash.
+Apply them **in order** to a clean upstream **v2.0.23** checkout (`git apply 0001 0002 0003 0004 0005 0006`); applying all six reproduces the full patched source tree (`0001`+`0002` are the verified rebased tree; `0003`, `0004`, `0005`, and `0006` are additive on top and touch only `packages/tui`, `packages/core`, and `packages/{protocol,server,core,client}` respectively). See [PATCHES.md](./PATCHES.md) for the exact `git apply` commands and the verified tree hash.
 
 ---
 

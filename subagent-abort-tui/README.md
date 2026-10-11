@@ -19,6 +19,11 @@ same thing: interrupt the viewed subagent's whole subtree.
 - The interrupts are issued **descendants-first** (the viewed session is aborted
   last), so a child that is holding a `waiting` parent open is stopped before its
   parent.
+- **Clean termination.** Aborting kills the viewed subagent and its descendants:
+  the cancellation is delivered to each aborted session as a **non-reviving**
+  notice, so the aborted sessions **do not resume**. There is no follow-up model
+  turn, no focus change, and no revival of the parent — the abort simply stops
+  the subtree.
 - It is **child-only**. While a main/root session (no `parentID`) or any
   non-session route is in view the command is **disabled** (not offered in the
   palette, slash command inert) and running it is a no-op — it never touches the
@@ -79,6 +84,11 @@ The default shortcut is configurable like any named command:
   that also cancels the session's outstanding durable background jobs, so a
   session parked in `waiting` actually stops. It is passed even though the
   plugin's bundled type definitions may not list the field yet.
+- **No revival after abort.** Core patch **`0006`** makes a cancelled job's
+  notice non-reviving (`resume: false` when `status === "cancelled"`), so
+  cancelling the subtree's background work cannot wake the aborted sessions back
+  into a new turn. Normal `succeeded`/`failed`/`error` completions still resume
+  their owner; only cancellation is admitted without reviving.
 
 ## Tests
 
