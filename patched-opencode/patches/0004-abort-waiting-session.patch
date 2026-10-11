@@ -1,0 +1,141 @@
+diff --git a/packages/core/src/session/execution.ts b/packages/core/src/session/execution.ts
+index 14f0240b86..379ee2423c 100644
+--- a/packages/core/src/session/execution.ts
++++ b/packages/core/src/session/execution.ts
+@@ -25,10 +25,11 @@ export interface Interface {
+   /** Registers newly recorded work. Repeated wakeups may coalesce. */
+   readonly wake: (sessionID: SessionSchema.ID) => Effect.Effect<void>
+   /**
+-   * Interrupt active work owned by this process. Idle interruption is a no-op. Resolves once
+-   * the interruption is accepted; cleanup settles asynchronously in the execution fiber.
+-   * Returns whether an active execution was interrupted. Compose with `awaitIdle` when
+-   * settlement matters. `awaitSettlement` waits only for the interrupted execution,
++   * Interrupt active work owned by this process. A no-op only when idle with no outstanding
++   * background work; a `waiting` Session's background work is cancelled and its terminal
++   * published. Resolves once the interruption is accepted; cleanup settles asynchronously in
++   * the execution fiber. Returns whether anything was interrupted. Compose with `awaitIdle`
++   * when settlement matters. `awaitSettlement` waits only for the interrupted execution,
+    * rather than fresh work admitted during its cleanup.
+    */
+   readonly interrupt: (
+@@ -168,7 +169,28 @@ export const layer = Layer.effect(
+       interrupt: (sessionID, options) =>
+         Effect.gen(function* () {
+           const interrupted = yield* coordinator.interrupt(sessionID, options?.reason ?? "user", options)
+-          if (!options?.resume) return interrupted
++          // A Session can settle its turn while still owning durable background work, which parks
++          // it in `waiting` with no active execution for the coordinator to interrupt. Cancel that
++          // work, clear its recovery marker, and publish the interrupted terminal so clients leave
++          // `waiting` and the Session does not immediately re-enter it.
++          let settled = interrupted
++          if (!settled) {
++            const pending = yield* jobs.pendingFor(sessionID)
++            if (pending.length > 0) {
++              yield* jobs.cancel(sessionID)
++              yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
++              yield* Effect.forEach(pending, (job) => jobs.completeBackground(job.notificationID), {
++                discard: true,
++              })
++              yield* bus.publish(
++                SessionEvent.Execution.Interrupted,
++                { sessionID, reason: options?.reason ?? "user" },
++                releaseOnCommit(sessionID),
++              )
++              settled = true
++            }
++          }
++          if (!options?.resume) return settled
+           // Resume steering input and between-turn control work from the interrupted
+           // intent. Queued next-turn prompts stay parked: a steer-scoped drain never
+           // promotes them, and a control item behind a queued prompt waits its turn.
+@@ -178,10 +200,10 @@ export const layer = Layer.effect(
+           // rows inside uninterruptible publications, so a steer row is either still
+           // promotable here or was fully delivered and needs no resumption.
+           const next = yield* SessionInbox.nextPromotable(db, sessionID, "input")
+-          if (next === undefined) return interrupted
++          if (next === undefined) return settled
+           if (next.delivery === "steer" || next.type === "compaction" || next.type === "move")
+             yield* coordinator.wake(sessionID, "steer")
+-          return interrupted
++          return settled
+         }),
+       resume: coordinator.run,
+       wake: coordinator.wake,
+diff --git a/packages/core/test/session-execution.test.ts b/packages/core/test/session-execution.test.ts
+index ff66dbcfb8..b543f3e23b 100644
+--- a/packages/core/test/session-execution.test.ts
++++ b/packages/core/test/session-execution.test.ts
+@@ -445,6 +445,73 @@ describe("SessionExecution lifecycle", () => {
+       expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Succeeded.type])
+     }),
+   )
++
++  it.effect("cancels outstanding background work and settles when interrupting a waiting Session", () =>
++    Effect.gen(function* () {
++      const database = yield* Database.Service
++      const bus = yield* Bus.Service
++      const jobs = yield* Job.Service
++      const sessionID = Session.ID.make("ses_interrupt_waiting_background")
++      yield* seedSessions(database, [sessionID])
++
++      const gate = yield* Deferred.make<void>()
++      const cancelled = yield* Deferred.make<void>()
++      const shell = yield* jobs.start({
++        id: "sh_interrupt_waiting",
++        type: "shell",
++        title: "sleep",
++        recovery: { kind: "shell", sessionID, shellID: "sh_interrupt_waiting", command: "sleep" },
++        run: Deferred.await(gate).pipe(
++          Effect.as(""),
++          Effect.onInterrupt(() => Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid)),
++        ),
++      })
++      const marker = yield* jobs.background(shell.id)
++      if (!marker?.notificationID) return yield* Effect.die("expected background marker")
++
++      const observed: string[] = []
++      const waiting = yield* Deferred.make<void>()
++      const interrupted = yield* Deferred.make<void>()
++      yield* bus.listen((event) =>
++        Effect.suspend(() => {
++          const data = event.data as { sessionID?: string }
++          if (data.sessionID !== sessionID) return Effect.void
++          if (
++            event.type !== SessionEvent.Execution.Interrupted.type &&
++            event.type !== SessionStatusEvent.Status.type
++          )
++            return Effect.void
++          observed.push(event.type)
++          if (event.type === SessionStatusEvent.Status.type)
++            return Deferred.succeed(waiting, undefined).pipe(Effect.asVoid)
++          return Deferred.succeed(interrupted, undefined).pipe(Effect.asVoid)
++        }),
++      )
++
++      const scope = yield* Scope.make()
++      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
++      const context = yield* buildExecution(scope, () => Effect.void)
++      const execution = Context.get(context, SessionExecution.Service)
++      yield* execution.resume(sessionID).pipe(Effect.forkScoped)
++      yield* Deferred.await(waiting)
++      yield* execution.awaitIdle(sessionID)
++
++      // The turn settled with outstanding durable work: waiting, but no active execution.
++      expect(observed).toEqual([SessionStatusEvent.Status.type])
++      expect(yield* execution.isActive(sessionID)).toBe(false)
++      expect(yield* jobs.awaiting(sessionID)).toBe(true)
++
++      // Interrupting a waiting Session is not a no-op: it cancels the background work,
++      // clears the durable marker, and publishes the interrupted terminal.
++      expect(yield* execution.interrupt(sessionID)).toBeTrue()
++      yield* Deferred.await(cancelled)
++      yield* Deferred.await(interrupted)
++      yield* execution.awaitIdle(sessionID)
++
++      expect(yield* jobs.awaiting(sessionID)).toBe(false)
++      expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Interrupted.type])
++    }),
++  )
+ })
+ 
+ describe("SessionRestart background recovery", () => {

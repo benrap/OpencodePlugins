@@ -13,7 +13,7 @@ sourced from this repo.
 | [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
 | [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
 | [`always-background`](./always-background) | server | Forces background execution for every tool call **except** `shell` and `subagent` via the `execute.before` hook; the exclude list is configurable. |
-| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build from source (sidebar `parentID` gate removal, waiting/tick/abort fix, and a child-session inline steer composer), with cumulative patches and switch/revert scripts. |
+| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build from source (sidebar `parentID` gate removal, waiting/tick fix, abort of a waiting session, and a child-session inline steer composer), with cumulative patches and switch/revert scripts. |
 | [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `subagent-status`, `subagent-abort`, `message_agent`, `question`, and `skill` tools are allowed, everything else denied. |
 
 ## Installation instructions (for AI agents)
@@ -149,7 +149,7 @@ node keep-awake/test/keep-awake.test.mjs
 - `subagent-status` defaults to `summary` mode (state + a 2-4 sentence LLM summary). Pass `mode: "state"` for a cheap status check (`running`/`idle`/`waiting`/`finished`) with no LLM call.
 - `always-background` forces `background: true` on every tool call except those in its `exclude` list (default `["shell", "subagent"]`, which keep their own user-controlled `background` input).
 - `keep-awake` keeps the machine awake but lets the display sleep (`keepDisplayOn`/`mode: "display"` to keep it on).
-- `patched-opencode` is a PATH shim, not a plugin: it launches the patched source via `bun run`, so source edits are picked up on the next invocation with no rebuild.
+- `patched-opencode` is a PATH shim, not a plugin: it launches the patched source via `bun run`, so source edits are picked up on the next invocation with no rebuild. Its cumulative patch set (`0001`–`0004`) adds the waiting/tick fix, removes the subagent sidebar gate, adds the child inline steer composer, and (`0004`) makes `/abort` actually stop a subagent stuck in `waiting`.
 
 ## License
 
