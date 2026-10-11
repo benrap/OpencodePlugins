@@ -1,6 +1,6 @@
 # PATCHES.md — `opencode-patched` vs upstream OpenCode v2.0.23
 
-Exact, per-file record of what this patch set changes relative to upstream **v2.0.23**. Nothing here is aspirational: the hunks below are the actual patch contents, and `0001`+`0002` together reproduce the `c212f31561` rebased source tree byte-for-byte (verified tree hash below), with `0003` and `0004` applying additively on top.
+Exact, per-file record of what this patch set changes relative to upstream **v2.0.23**. Nothing here is aspirational: the hunks below are the actual patch contents, and `0001`+`0002` together reproduce the `c212f31561` rebased source tree byte-for-byte (verified tree hash below), with `0003`, `0004`, and `0005` applying additively on top.
 
 ---
 
@@ -11,11 +11,12 @@ What these patches actually do:
 1. **Waiting status while background work is outstanding.** When a session's turn settles as "succeeded" but the session still owns outstanding durable background work (shell jobs it started, or a subagent awaiting its child), the core **withholds `SessionEvent.Execution.Succeeded`** and instead publishes a `session.status` event with `{ type: "waiting" }`. Clients therefore do not reduce the session to `idle`, so the completion tick does not appear. The terminal is emitted only once the background work is acknowledged and resumes/completes the turn.
 2. **TUI treats `waiting` as running (busy).** The sidebar tab "busy" computation, the subagent running indicator, and the app session model all treat `waiting` as an active, non-idle status. The TUI shows a `waiting for background work…` line instead of a done tick.
 3. **Sidebar gate removed.** `packages/tui/src/component/session-frame.tsx` no longer hides the sidebar for sessions with a `parentID`, so subagent/child sessions render in the sidebar tree.
-4. **Abort cancels pending background jobs.** When a turn is interrupted, the session's pending background jobs are cancelled in addition to the session job itself, so aborting a waiting session actually clears the outstanding work.
+4. **Abort can cancel pending background jobs (`cancelBackground`).** When a turn is interrupted with `cancelBackground: true`, the session's pending background jobs are cancelled in addition to the session job itself. `0005` refines this: the default interrupt is now **foreground-only**, so this job-cancellation only runs when `cancelBackground` is requested.
 5. **Subagent background-completion fixes.** Subagent completion now runs the child to quiescence, waiting for its pending background notifications (`awaitBackground`) before finalizing the response, and restart recovery drains through the provided execution instance rather than the global `Session` service.
 6. **Generated client types and schema** gain the `waiting` status member, and extensive tests cover the new behavior.
 7. **Inline steer composer for child sessions** (`0003`). Viewing a child/subagent session now renders the normal host `<Prompt>` (the inline steer composer) instead of force-opening the `Composer` subagent picker and rendering `null`. The host `Prompt` submits to its own `props.sessionID` and defaults `delivery` to `"steer"`, so typed input is sent to the viewed child as a steer prompt. The composer's **agent type** also follows the viewed child's own agent (see `(c)`), so it neither displays the main agent's type nor switches the child's agent on submit, and the whole composer box uses a distinct **blue palette** while a subagent is being viewed. The picker stays reachable via `session.child.first` ("Toggle subagent picker", default `down`); main-session behavior is untouched.
-8. **Aborting a `waiting` session now actually stops it** (`0004`). A session whose turn settled with outstanding durable background work sits in `waiting` with **no active execution** for the coordinator to interrupt, so an abort was previously a no-op. `SessionExecution.interrupt` now handles that case: when there is no live execution but the session still owns outstanding durable background work, it cancels that work, clears its durable recovery marker (so the session is no longer `awaiting`), and publishes the `session.execution.interrupted` terminal so clients leave `waiting`. A genuinely idle session (no outstanding background work) remains a `false` no-op. Effect: `/abort` and the child-composer Ctrl+D now genuinely stop a waiting subagent (its job's process scope is closed, which reaps the underlying shell process). Touches only `packages/core`; applies on top of `0001`–`0003` and is independent of the `0003` TUI change.
+8. **Aborting a `waiting` session now actually stops it** (`0004`). A session whose turn settled with outstanding durable background work sits in `waiting` with **no active execution** for the coordinator to interrupt, so an abort was previously a no-op. `SessionExecution.interrupt` now handles that case: when there is no live execution but the session still owns outstanding durable background work, it cancels that work, clears its durable recovery marker (so the session is no longer `awaiting`), and publishes the `session.execution.interrupted` terminal so clients leave `waiting`. A genuinely idle session (no outstanding background work) remains a `false` no-op. Effect: `/abort` and the child-composer Ctrl+D now genuinely stop a waiting subagent (its job's process scope is closed, which reaps the underlying shell process). Touches only `packages/core`; applies on top of `0001`–`0003` and is independent of the `0003` TUI change. `0005` then makes this waiting-branch cancellation **opt-in**: it now runs only when the interrupt is asked for with `cancelBackground: true`.
+9. **`Esc Esc` is foreground-only; `cancelBackground` restores full-stop** (`0005`). `session.interrupt` gains an optional `cancelBackground` flag (default `false`). By default an interrupt now stops only the **foreground** turn: interrupting a live turn does **not** cancel the session's durable background jobs, and interrupting a `waiting` session (no active execution) is a **no-op**. This is what `Esc Esc` needs: the user asked to stop the agent in front of them, not to tear down unrelated background tasks. Passing `cancelBackground: true` restores the old `0002`/`0004` behavior — cancel the session's outstanding background jobs, including settling a `waiting` session with the interrupted terminal. Internal teardown callers that must not leave orphaned background work (`Session.remove`, and the inactivity reaper in `location-activity.ts`) now pass `cancelBackground: true` explicitly. Touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests; applies on top of `0001`–`0004` and contains no `packages/tui` hunks.
 
 ---
 
@@ -47,13 +48,17 @@ b26f96ae47 feat(tui): surface waiting session status
 | `0002-session-waiting-status-tick-fix.patch` | **19** | Waiting status feature: schema/client/core/app/tui/plugin + tests |
 | `0003-child-composer-steer.patch` | **5** | Child-session inline steer composer + agent type follows the viewed child + blue composer palette + regression test |
 | `0004-abort-waiting-session.patch` | **2** | Abort of a `waiting` session cancels its outstanding durable background work and publishes the interrupted terminal (`packages/core` only) |
+| `0005-interrupt-foreground-only.patch` | **13** | Foreground-only interrupt: `session.interrupt` gains `cancelBackground` (default `false`) in protocol/server/core + 4 generated client files + 3 core tests |
 | **0001+0002 total** | **20** | Matches the `c212f31561` branch diff exactly |
 | **0001+0002+0003 total** | **25** | Adds the inline steer composer, child agent type, and blue palette on top |
 | **0001+0002+0003+0004 total** | **27** | Adds the waiting-session abort fix on top |
+| **0001+0002+0003+0004+0005 total** | **40** | Adds the foreground-only interrupt on top (per-patch sum; `0005` overlaps a few `0002`/`0004` files — see the note) |
 
 > `0003` is **additive**: it is not part of the `c212f31561` waiting-status branch, so the tree-hash proof below still describes `0001+0002` only. `0003` applies cleanly on top of that tree and does not touch any file from `0001`/`0002`.
 
 > `0004` is **additive** as well: it applies cleanly on top of `0001`–`0003`, touches only `packages/core` (never the `0003` TUI files), and is likewise **not** part of the `c212f31561` tree-hash proof below.
+
+> `0005` is **additive** too: it applies cleanly on top of `0001`–`0004`, touches only `packages/protocol`, `packages/server`, `packages/core`, and the generated client (no `packages/tui` hunks, so it does not modify the `0003` TUI files), and is likewise **not** part of the `c212f31561` tree-hash proof below. Its 13 files overlap three earlier patches (`packages/core/src/session/execution.ts` also in `0002`/`0004`, `packages/client/src/promise/generated/types.ts` also in `0002`, and `packages/core/test/session-execution.test.ts` also in `0002`/`0004`), so the cumulative total above is the sum of per-patch counts, not a distinct-file count.
 
 > **Scope & accuracy note:** An earlier README implied the patches covered the whole branch while they did in fact only cover part of it. The regenerated patch set now covers **all 20 files** in the branch diff: `0002` contains 19 files and `0001` contains the remaining 1. This is verified by counting `diff --git` headers and by the tree-hash check in "How to apply".
 
@@ -1022,7 +1027,223 @@ AFTER (added test)
   )
 ```
 
-**Rationale:** proves the waiting case is not a no-op — the job's `onInterrupt` fires, the durable marker clears (`jobs.awaiting` → `false`), and the terminal moves from `waiting` to `session.execution.interrupted`. Full test text is in the patch.
+**Rationale:** proves the waiting case is not a no-op — the job's `onInterrupt` fires, the durable marker clears (`jobs.awaiting` → `false`), and the terminal moves from `waiting` to `session.execution.interrupted`. Full test text is in the patch. (`0005` later makes this cancellation **opt-in** via `cancelBackground: true`, and the test now passes that flag — see (e).)
+
+---
+
+## (e) Foreground-only interrupt
+
+### `packages/protocol/src/groups/session.ts` — patch **0005**
+
+**Hunk 1** — accept the new `cancelBackground` query flag on the endpoint.
+
+```
+BEFORE
+        query: { resume: BooleanFromString.pipe(Schema.optional) },
+
+AFTER
+        query: {
+          resume: BooleanFromString.pipe(Schema.optional),
+          cancelBackground: BooleanFromString.pipe(Schema.optional),
+        },
+```
+
+**Hunk 2** — document the default/opt-in semantics.
+
+```
+BEFORE
+              "Interrupt active execution owned by this OpenCode process. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, ..."
+
+AFTER
+              "Interrupt active execution owned by this OpenCode process. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. By default the interrupt is foreground-only: it stops a live foreground turn but leaves the Session's durable background jobs running, and interrupting a waiting Session (no active execution) is a no-op. Pass cancelBackground=true to also cancel the Session's outstanding background jobs and to settle a waiting Session. When resume=true, ..."
+```
+
+**Rationale:** the wire protocol exposes the opt-in, defaulting to the foreground-only behavior when the flag is absent.
+
+---
+
+### `packages/server/src/handlers/session.ts` — patch **0005**
+
+```
+BEFORE
+          return { interrupted: yield* session.interrupt(ctx.params.sessionID, { resume: ctx.query.resume }) }
+
+AFTER
+          return {
+            interrupted: yield* session.interrupt(ctx.params.sessionID, {
+              resume: ctx.query.resume,
+              cancelBackground: ctx.query.cancelBackground,
+            }),
+          }
+```
+
+**Rationale:** forwards the new query parameter straight to `Session.interrupt`.
+
+---
+
+### `packages/core/src/session.ts` — patch **0005**
+
+**Hunk 1** — widen the `Session` interface's interrupt options.
+
+```
+BEFORE
+  readonly interrupt: (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean }) => Effect.Effect<boolean>
+
+AFTER
+  readonly interrupt: (
+    sessionID: SessionSchema.ID,
+    options?: { readonly resume?: boolean; readonly cancelBackground?: boolean },
+  ) => Effect.Effect<boolean>
+```
+
+**Hunk 2** — `Session.remove` keeps its pre-`0005` teardown by opting in.
+
+```
+BEFORE
+        yield* execution.interrupt(sessionID)
+
+AFTER
+        // Removing a Session tears down its durable background work with it: an
+        // interrupt must not leave orphaned background jobs behind.
+        yield* execution.interrupt(sessionID, { cancelBackground: true })
+```
+
+**Rationale:** the interface gains the flag, and removal explicitly requests background cancellation so it never leaves orphaned durable jobs.
+
+---
+
+### `packages/core/src/session/execution.ts` — patch **0005**
+
+**Hunk 1** — the `interrupt` interface doc-comment now describes the foreground-only default.
+
+```
+BEFORE
+   * Interrupt active work owned by this process. A no-op only when idle with no outstanding
+   * background work; a `waiting` Session's background work is cancelled and its terminal
+   * published. ...
+
+AFTER
+   * Interrupt active work owned by this process. A live foreground turn is interrupted whenever
+   * this process owns one. The interrupt is foreground-only by default: a `waiting` Session (no
+   * active execution) is a no-op and the Session's outstanding durable background work is left
+   * running. Pass `cancelBackground: true` to also cancel the Session's outstanding background
+   * jobs (`jobs.cancel`, pending job cancellation, `jobs.completeBackground`) and to settle a
+   * `waiting` Session with the interrupted terminal. ...
+```
+
+**Hunk 2** — record the opt-in in a per-session set so the settled hook can observe it.
+
+```
+AFTER (added in the layer body)
+    // Interrupts are foreground-only by default. Only an explicit `cancelBackground` interrupt
+    // cancels a Session's durable background work, so the opt-in is recorded here when
+    // `Service.interrupt` runs and is consumed by whichever settlement path handles it: the
+    // coordinator's settled hook for a live turn, or the waiting branch for a parked Session.
+    const cancelBackgroundOnInterrupt = new Set<SessionSchema.ID>()
+```
+
+**Hunk 3** — the coordinator's `settled` hook consumes the opt-in and only cancels background jobs when it was requested.
+
+```
+BEFORE
+            const outcome = terminal(exit, reason)
+            ...
+              if (outcome.reason !== "shutdown") {
+                yield* jobs.cancel(sessionID)
+                const pending = yield* jobs.pendingFor(sessionID)
+                yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
+
+AFTER
+            // Consume the opt-in recorded by `Service.interrupt`. ...
+            const cancelBackground = cancelBackgroundOnInterrupt.delete(sessionID)
+            const outcome = terminal(exit, reason)
+            ...
+              if (outcome.reason !== "shutdown" && cancelBackground) {
+                yield* jobs.cancel(sessionID)
+                const pending = yield* jobs.pendingFor(sessionID)
+                yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
+```
+
+**Hunk 4** — `Service.interrupt` records the opt-in before interrupting, and the `waiting` branch only cancels/terminalizes when `cancelBackground` was requested.
+
+```
+AFTER
+        interrupt: (sessionID, options) =>
+          Effect.gen(function* () {
+            const cancelBackground = options?.cancelBackground === true
+            // Record the opt-in before interrupting so the settled hook of the live turn we are
+            // about to stop observes it; the hook consumes the flag when it runs.
+            if (cancelBackground) cancelBackgroundOnInterrupt.add(sessionID)
+            const interrupted = yield* coordinator.interrupt(sessionID, options?.reason ?? "user", options)
+            ...
+            let settled = interrupted
+            if (!settled) {
+              if (cancelBackground) {
+                const pending = yield* jobs.pendingFor(sessionID)
+                if (pending.length > 0) { ... publish SessionEvent.Execution.Interrupted ... }
+              }
+              // No active execution was interrupted, so no settled hook will consume the opt-in.
+              cancelBackgroundOnInterrupt.delete(sessionID)
+            }
+```
+
+**Rationale:** the two settlement paths (a live turn's coordinator hook, and the `waiting` branch) now share one opt-in signal, so a default interrupt is foreground-only and `cancelBackground: true` reproduces the old `0002`/`0004` behavior.
+
+---
+
+### `packages/core/src/session/session.ts` — patch **0005**
+
+```
+BEFORE
+    (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean }) =>
+
+AFTER
+    (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean; readonly cancelBackground?: boolean }) =>
+```
+
+**Rationale:** the public `Session.interrupt` facade accepts and forwards the flag.
+
+---
+
+### `packages/core/src/location-activity.ts` — patch **0005**
+
+```
+BEFORE
+                (session) => execution.interrupt(session.id, { reason: "inactivity", awaitSettlement: true }),
+
+AFTER
+                (session) =>
+                  execution.interrupt(session.id, {
+                    reason: "inactivity",
+                    awaitSettlement: true,
+                    cancelBackground: true,
+                  }),
+```
+
+**Rationale:** the inactivity reaper must keep tearing down a reaped Session's durable background work; a foreground-only interrupt would regress that.
+
+---
+
+### Generated client files — patch **0005**
+
+Four generated files keep the typed client in sync with the new query parameter:
+
+- `packages/client/src/effect/api/api.ts` — `SessionInterruptInput` gains `cancelBackground?: boolean`.
+- `packages/client/src/effect/generated/client.ts` — the interrupt endpoint forwards `cancelBackground` in the query.
+- `packages/client/src/promise/generated/client.ts` — the promise client sends `query: { resume, cancelBackground }`.
+- `packages/client/src/promise/generated/types.ts` — `SessionInterruptInput` gains `cancelBackground?`.
+
+**Rationale:** the generated clients mirror the protocol so callers can request background cancellation.
+
+---
+
+### Core tests — patch **0005**
+
+- `packages/core/test/session-execution.test.ts` — updates the two prior interrupt tests to pass `{ cancelBackground: true }`, and adds two tests: a default interrupt of a **running** turn stops the foreground turn but leaves the durable background job `running`, and a default interrupt of a **waiting** Session is a `false` no-op that publishes no terminal and leaves the background job `running`.
+- `packages/core/test/location-activity.test.ts` — adds a test proving inactivity eviction still cancels the evicted Session's durable background work (`cancelBackground: true`).
+- `packages/core/test/session-remove.test.ts` — records the interrupt options forwards and asserts `Session.remove` calls `execution.interrupt(id, { cancelBackground: true })`.
+
+**Rationale:** pins the foreground-only default and the explicit-teardown opt-ins.
 
 ---
 
@@ -1039,9 +1260,10 @@ git apply /path/to/patches/0001-remove-parentid-sidebar-gate.patch
 git apply /path/to/patches/0002-session-waiting-status-tick-fix.patch
 git apply /path/to/patches/0003-child-composer-steer.patch
 git apply /path/to/patches/0004-abort-waiting-session.patch
+git apply /path/to/patches/0005-interrupt-foreground-only.patch
 ```
 
-`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (the route/context/app/prompt changes plus its regression test), and `0004` applies cleanly on top of that. `0004` touches only `packages/core` (`execution.ts` plus its test), so — like `0003` — it is additive and does not modify any `0001`/`0002` file or the `0003` TUI files.
+`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (the route/context/app/prompt changes plus its regression test), `0004` applies cleanly on top of that, and `0005` applies cleanly on top of `0001`–`0004`. `0004` touches only `packages/core` (`execution.ts` plus its test), so — like `0003` — it is additive and does not modify any `0001`/`0002` file or the `0003` TUI files. `0005` touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests — it contains no `packages/tui` hunks, so it too leaves the `0003` TUI changes untouched.
 
 **Reproduction proof.** After applying `0001`+`0002` and staging the result, the resulting Git tree is identical to the rebased head's tree:
 

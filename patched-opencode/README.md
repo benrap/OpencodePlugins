@@ -1,6 +1,6 @@
 # opencode-patched
 
-A runnable **Windows x64** build of OpenCode based on upstream v2.0.23 (tag `v2.0.23`, commit `0fd7e2829449b052abf0078666669302923d77af`), plus a small patch set that adds a session **waiting** status and removes the subagent sidebar gate.
+A runnable **Windows x64** build of OpenCode based on upstream v2.0.23 (tag `v2.0.23`, commit `0fd7e2829449b052abf0078666669302923d77af`), plus a small patch set that adds a session **waiting** status, removes the subagent sidebar gate, and makes the default interrupt **foreground-only**.
 
 ---
 
@@ -34,25 +34,27 @@ This is patched OpenCode built from upstream **v2.0.23** with the changes docume
 - The TUI treats `waiting` as busy (running), shows a "waiting for background work…" indicator, and does not render the completion tick until the work truly finishes.
 - The **subagent sidebar gate** is removed, so child/subagent sessions render in the sidebar tree regardless of their `parentID`.
 - **Inline steer composer for subagent sessions.** Viewing a child/subagent session now renders the normal host message composer; typing in it submits the text to the viewed child as a **steer** prompt (the host `Prompt` already defaults `delivery` to `"steer"` and targets its `sessionID`). The composer's **agent type** reflects that subagent's own agent (not the main agent's), the whole composer box uses a distinct **blue palette**, so the steer is associated with the right agent type and it is obvious who is being spoken to. The subagent picker is no longer force-opened for children — it stays reachable via the "Toggle subagent picker" command (`session.child.first`, default `down`). Main-session behavior is unchanged.
-- Aborting a session also cancels its pending background jobs, and subagent completion now waits for child background work before finalizing its response.
-- **Aborting a `waiting` session now actually stops it** (`0004`): a subagent that has settled its turn with outstanding durable background work sits in `waiting` with no live execution to interrupt, so its abort used to be a no-op. `SessionExecution.interrupt` now cancels that background work, clears its durable recovery marker, and publishes the interrupted terminal, so `/abort` and the child-composer Ctrl+D genuinely stop the waiting subagent.
+- Aborting a session can also cancel its pending background jobs — but only when the interrupt asks for it with `cancelBackground: true` (see `0005`); a default interrupt is foreground-only. Subagent completion now waits for child background work before finalizing its response.
+- **Aborting a `waiting` session now actually stops it** (`0004`): a subagent that has settled its turn with outstanding durable background work sits in `waiting` with no live execution to interrupt, so its abort used to be a no-op. `SessionExecution.interrupt` now cancels that background work, clears its durable recovery marker, and publishes the interrupted terminal, so the child-composer Ctrl+D genuinely stops the waiting subagent. `0005` makes this cancellation opt-in via `cancelBackground: true`.
+- **`Esc Esc` is foreground-only** (`0005`): `session.interrupt` gains an optional `cancelBackground` flag (default `false`). By default, interrupting stops only the **foreground** turn — it does **not** cancel the session's durable background jobs — and interrupting a `waiting` session (no active execution) is a **no-op**. This is what `Esc Esc` needs: stop the agent in front of you without touching background tasks. Passing `cancelBackground: true` restores the full-stop behavior (cancel outstanding background jobs, including settling a `waiting` session). Internal teardown callers that must not orphan background work (`Session.remove`, the inactivity reaper) pass `cancelBackground: true`.
 
-For the exact per-file diff (the 20 changed files from `0001`+`0002`, the `0003` inline-steer-composer change and its test, and the `0004` waiting-abort change and its test — before/after hunks, grouping, and how to apply the patches to a clean checkout), see **[PATCHES.md](./PATCHES.md)**.
+For the exact per-file diff (the 20 changed files from `0001`+`0002`, the `0003` inline-steer-composer change and its test, the `0004` waiting-abort change and its test, and the `0005` foreground-only-interrupt change and its tests — before/after hunks, grouping, and how to apply the patches to a clean checkout), see **[PATCHES.md](./PATCHES.md)**.
 
 ---
 
 ## Patch files
 
-Four patch files are provided:
+Five patch files are provided:
 
 | Patch | Contents |
 |-------|----------|
 | `patches/0001-remove-parentid-sidebar-gate.patch` | Removes the `parentID` sidebar gate in `packages/tui/src/component/session-frame.tsx`. |
 | `patches/0002-session-waiting-status-tick-fix.patch` | The waiting-status feature and completion-tick fix across schema/client/core/app/tui/plugin, plus tests (19 files). |
 | `patches/0003-child-composer-steer.patch` | Makes a child session's host composer the inline steer composer (render the host `Prompt` instead of force-opening the subagent picker), makes the composer's agent type follow the viewed child's own agent, and gives the composer a distinct blue palette while viewing a subagent, plus a regression test (`packages/tui/src/routes/session/index.tsx`, `packages/tui/src/context/local.tsx`, `packages/tui/src/app.tsx`, `packages/tui/src/component/prompt/index.tsx`, `packages/tui/test/child-composer-steer.test.tsx`). |
-| `patches/0004-abort-waiting-session.patch` | Makes aborting a `waiting` session (one whose turn settled with outstanding durable background work and so has no live execution) cancel that background work, clear its durable recovery marker, and publish the interrupted terminal, plus a regression test (`packages/core/src/session/execution.ts`, `packages/core/test/session-execution.test.ts`). |
+| `patches/0004-abort-waiting-session.patch` | Makes aborting a `waiting` session (one whose turn settled with outstanding durable background work and so has no live execution) cancel that background work, clear its durable recovery marker, and publish the interrupted terminal, plus a regression test (`packages/core/src/session/execution.ts`, `packages/core/test/session-execution.test.ts`). `0005` makes this cancellation opt-in via `cancelBackground: true`. |
+| `patches/0005-interrupt-foreground-only.patch` | Adds `cancelBackground` (default `false`) to `session.interrupt`, making the default interrupt **foreground-only**: a live foreground turn stops but the session's durable background jobs keep running, and interrupting a `waiting` session is a no-op. `cancelBackground: true` restores the full-stop behavior; `Session.remove` and the inactivity reaper opt in. Touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests. |
 
-Apply them **in order** to a clean upstream **v2.0.23** checkout (`git apply 0001 0002 0003 0004`); applying all four reproduces the full patched source tree (`0001`+`0002` are the verified rebased tree; `0003` and `0004` are additive on top and touch only `packages/tui` and `packages/core` respectively). See [PATCHES.md](./PATCHES.md) for the exact `git apply` commands and the verified tree hash.
+Apply them **in order** to a clean upstream **v2.0.23** checkout (`git apply 0001 0002 0003 0004 0005`); applying all five reproduces the full patched source tree (`0001`+`0002` are the verified rebased tree; `0003`, `0004`, and `0005` are additive on top and touch only `packages/tui`, `packages/core`, and `packages/{protocol,server,core,client}` respectively). See [PATCHES.md](./PATCHES.md) for the exact `git apply` commands and the verified tree hash.
 
 ---
 
