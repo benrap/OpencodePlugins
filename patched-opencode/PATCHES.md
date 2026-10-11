@@ -1,6 +1,6 @@
 # PATCHES.md — `opencode-patched` vs upstream OpenCode v2.0.23
 
-Exact, per-file record of what this patch set changes relative to upstream **v2.0.23**. Nothing here is aspirational: the hunks below are the actual patch contents, and the two patch files together reproduce the rebased source tree byte-for-byte (verified tree hash below).
+Exact, per-file record of what this patch set changes relative to upstream **v2.0.23**. Nothing here is aspirational: the hunks below are the actual patch contents, and `0001`+`0002` together reproduce the `c212f31561` rebased source tree byte-for-byte (verified tree hash below), with `0003` and `0004` applying additively on top.
 
 ---
 
@@ -15,6 +15,7 @@ What these patches actually do:
 5. **Subagent background-completion fixes.** Subagent completion now runs the child to quiescence, waiting for its pending background notifications (`awaitBackground`) before finalizing the response, and restart recovery drains through the provided execution instance rather than the global `Session` service.
 6. **Generated client types and schema** gain the `waiting` status member, and extensive tests cover the new behavior.
 7. **Inline steer composer for child sessions** (`0003`). Viewing a child/subagent session now renders the normal host `<Prompt>` (the inline steer composer) instead of force-opening the `Composer` subagent picker and rendering `null`. The host `Prompt` submits to its own `props.sessionID` and defaults `delivery` to `"steer"`, so typed input is sent to the viewed child as a steer prompt. The composer's **agent type** also follows the viewed child's own agent (see `(c)`), so it neither displays the main agent's type nor switches the child's agent on submit, and the whole composer box uses a distinct **blue palette** while a subagent is being viewed. The picker stays reachable via `session.child.first` ("Toggle subagent picker", default `down`); main-session behavior is untouched.
+8. **Aborting a `waiting` session now actually stops it** (`0004`). A session whose turn settled with outstanding durable background work sits in `waiting` with **no active execution** for the coordinator to interrupt, so an abort was previously a no-op. `SessionExecution.interrupt` now handles that case: when there is no live execution but the session still owns outstanding durable background work, it cancels that work, clears its durable recovery marker (so the session is no longer `awaiting`), and publishes the `session.execution.interrupted` terminal so clients leave `waiting`. A genuinely idle session (no outstanding background work) remains a `false` no-op. Effect: `/abort` and the child-composer Ctrl+D now genuinely stop a waiting subagent (its job's process scope is closed, which reaps the underlying shell process). Touches only `packages/core`; applies on top of `0001`–`0003` and is independent of the `0003` TUI change.
 
 ---
 
@@ -45,10 +46,14 @@ b26f96ae47 feat(tui): surface waiting session status
 | `0001-remove-parentid-sidebar-gate.patch` | **1** | Sidebar gate removal in `session-frame.tsx` |
 | `0002-session-waiting-status-tick-fix.patch` | **19** | Waiting status feature: schema/client/core/app/tui/plugin + tests |
 | `0003-child-composer-steer.patch` | **5** | Child-session inline steer composer + agent type follows the viewed child + blue composer palette + regression test |
+| `0004-abort-waiting-session.patch` | **2** | Abort of a `waiting` session cancels its outstanding durable background work and publishes the interrupted terminal (`packages/core` only) |
 | **0001+0002 total** | **20** | Matches the `c212f31561` branch diff exactly |
 | **0001+0002+0003 total** | **25** | Adds the inline steer composer, child agent type, and blue palette on top |
+| **0001+0002+0003+0004 total** | **27** | Adds the waiting-session abort fix on top |
 
 > `0003` is **additive**: it is not part of the `c212f31561` waiting-status branch, so the tree-hash proof below still describes `0001+0002` only. `0003` applies cleanly on top of that tree and does not touch any file from `0001`/`0002`.
+
+> `0004` is **additive** as well: it applies cleanly on top of `0001`–`0003`, touches only `packages/core` (never the `0003` TUI files), and is likewise **not** part of the `c212f31561` tree-hash proof below.
 
 > **Scope & accuracy note:** An earlier README implied the patches covered the whole branch while they did in fact only cover part of it. The regenerated patch set now covers **all 20 files** in the branch diff: `0002` contains 19 files and `0001` contains the remaining 1. This is verified by counting `diff --git` headers and by the tree-hash check in "How to apply".
 
@@ -937,6 +942,90 @@ Both composer borders (`borderColor={borderHighlight()}` → `borderColor={promp
 
 ---
 
+## (d) Waiting-session abort
+
+### `packages/core/src/session/execution.ts` — patch **0004**
+
+**Hunk 1** — the `interrupt` interface doc-comment: idle is now a no-op *only* when there is no outstanding background work.
+
+```
+BEFORE
+   * Interrupt active work owned by this process. Idle interruption is a no-op. Resolves once
+   * the interruption is accepted; cleanup settles asynchronously in the execution fiber.
+   * Returns whether an active execution was interrupted. Compose with `awaitIdle` when
+   * settlement matters. `awaitSettlement` waits only for the interrupted execution,
+
+AFTER
+   * Interrupt active work owned by this process. A no-op only when idle with no outstanding
+   * background work; a `waiting` Session's background work is cancelled and its terminal
+   * published. Resolves once the interruption is accepted; cleanup settles asynchronously in
+   * the execution fiber. Returns whether anything was interrupted. Compose with `awaitIdle`
+   * when settlement matters. `awaitSettlement` waits only for the interrupted execution,
+```
+
+**Hunk 2** — when the coordinator did not interrupt a live execution, cancel the session's outstanding durable background work, clear its markers, and publish the interrupted terminal. The returned boolean is renamed `interrupted` → `settled` and now means "anything was interrupted".
+
+```
+AFTER (added)
+          // A Session can settle its turn while still owning durable background work, which parks
+          // it in `waiting` with no active execution for the coordinator to interrupt. Cancel that
+          // work, clear its recovery marker, and publish the interrupted terminal so clients leave
+          // `waiting` and the Session does not immediately re-enter it.
+          let settled = interrupted
+          if (!settled) {
+            const pending = yield* jobs.pendingFor(sessionID)
+            if (pending.length > 0) {
+              yield* jobs.cancel(sessionID)
+              yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
+              yield* Effect.forEach(pending, (job) => jobs.completeBackground(job.notificationID), {
+                discard: true,
+              })
+              yield* bus.publish(
+                SessionEvent.Execution.Interrupted,
+                { sessionID, reason: options?.reason ?? "user" },
+                releaseOnCommit(sessionID),
+              )
+              settled = true
+            }
+          }
+          if (!options?.resume) return settled
+```
+
+The three later `return interrupted` sites become `return settled` (the `resume`-path early return and the two final returns).
+
+**Rationale:** a `waiting` session has no live execution, so `coordinator.interrupt` returns `false`; the only way to stop it is to cancel its durable background Jobs (`jobs.pendingFor` → `jobs.cancel(job.id)`) and clear their recovery markers (`jobs.completeBackground(job.notificationID)`, which also wakes `awaitBackground` waiters), then publish `session.execution.interrupted` so clients leave `waiting`. A session idle with no pending background work still takes the `false` no-op path.
+
+---
+
+### `packages/core/test/session-execution.test.ts` — patch **0004**
+
+```
+AFTER (added test)
+  it.effect("cancels outstanding background work and settles when interrupting a waiting Session", () =>
+    Effect.gen(function* () {
+      ... // start a background shell job gated on a Deferred
+      // The turn settled with outstanding durable work: waiting, but no active execution.
+      expect(observed).toEqual([SessionStatusEvent.Status.type])
+      expect(yield* execution.isActive(sessionID)).toBe(false)
+      expect(yield* jobs.awaiting(sessionID)).toBe(true)
+
+      // Interrupting a waiting Session is not a no-op: it cancels the background work,
+      // clears the durable marker, and publishes the interrupted terminal.
+      expect(yield* execution.interrupt(sessionID)).toBeTrue()
+      yield* Deferred.await(cancelled)
+      yield* Deferred.await(interrupted)
+      yield* execution.awaitIdle(sessionID)
+
+      expect(yield* jobs.awaiting(sessionID)).toBe(false)
+      expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Interrupted.type])
+    }),
+  )
+```
+
+**Rationale:** proves the waiting case is not a no-op — the job's `onInterrupt` fires, the durable marker clears (`jobs.awaiting` → `false`), and the terminal moves from `waiting` to `session.execution.interrupted`. Full test text is in the patch.
+
+---
+
 ## How to apply
 
 Apply against a **clean upstream v2.0.23 checkout** (`0fd7e2829449b052abf0078666669302923d77af`), in order:
@@ -949,11 +1038,12 @@ git checkout 0fd7e2829449b052abf0078666669302923d77af   # tag v2.0.23
 git apply /path/to/patches/0001-remove-parentid-sidebar-gate.patch
 git apply /path/to/patches/0002-session-waiting-status-tick-fix.patch
 git apply /path/to/patches/0003-child-composer-steer.patch
+git apply /path/to/patches/0004-abort-waiting-session.patch
 ```
 
-`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (2 files: the route change plus its regression test).
+`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (the route/context/app/prompt changes plus its regression test), and `0004` applies cleanly on top of that. `0004` touches only `packages/core` (`execution.ts` plus its test), so — like `0003` — it is additive and does not modify any `0001`/`0002` file or the `0003` TUI files.
 
-**Reproduction proof.** After applying both patches and staging the result, the resulting Git tree is identical to the rebased head's tree:
+**Reproduction proof.** After applying `0001`+`0002` and staging the result, the resulting Git tree is identical to the rebased head's tree:
 
 ```
 git add -A
@@ -964,4 +1054,4 @@ git -C <rebased-clone> rev-parse 'c212f315615f2f6eeff6c706f54dd61153d6f5ba^{tree
 # => 934165bfed50ce088418d0c4ac1c15a44e9e8762
 ```
 
-The tree hash `934165bfed50ce088418d0c4ac1c15a44e9e8762` is the same from both routes, so the two patch files exactly reproduce the rebased tree — nothing more, nothing less.
+The tree hash `934165bfed50ce088418d0c4ac1c15a44e9e8762` is the same from both routes, so `0001`+`0002` exactly reproduce the `c212f31561` tree — nothing more, nothing less. This proof covers `0001`+`0002` **only**: `0003` and `0004` are additive patches applied on top of that tree and are deliberately not folded into this hash.
