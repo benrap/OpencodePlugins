@@ -6,6 +6,7 @@ sourced from this repo.
 | Item | Type | Description |
 | --- | --- | --- |
 | [`subagent-abort`](./subagent-abort) | server | Registers the `abort_subagent` tool to interrupt active descendant subagent sessions of the calling session (one named descendant, or every running descendant). |
+| [`subagent-abort-tui`](./subagent-abort-tui) | TUI | TUI command (`ctrl+d` / `/abort`) that aborts (interrupts) the child subagent session currently in view; child-only — does nothing on a main session. |
 | [`subagent-message`](./subagent-message) | server | Registers the `message_agent` tool for lineage-scoped agent-to-agent messaging: send to your parent or a direct child only (siblings, non-descendants, and level-skips rejected). Steers an active target, otherwise queues a follow-up. |
 | [`subagent-sidebar-tree`](./subagent-sidebar-tree) | TUI | TUI sidebar panel showing live child subagent sessions as a nested tree. |
 | [`subagent-status`](./subagent-status) | server | `subagent-status` tool that probes a subagent's state without pulling its raw transcript into the caller's context. Three modes: `state` (lightweight, no LLM call), `summary` (default; adds an LLM summary), and `all` (the name and state of every active subagent, no LLM call). |
@@ -23,7 +24,8 @@ your own. Config root: `~/.config/opencode` (`$env:USERPROFILE\.config\opencode`
 ### 1. Register plugins in `~/.config/opencode/opencode.jsonc`
 
 Add entries to the top-level `"plugins"` array. `subagent-abort`,
-`subagent-message`, `subagent-sidebar-tree`, and `subagent-status` are
+`subagent-abort-tui`, `subagent-message`, `subagent-sidebar-tree`, and
+`subagent-status` are
 referenced **directly from this checkout** (path-based, no copy step).
 `keep-awake`, `always-background`, and `prefill` load from
 `~/.config/opencode/plugins/<name>/`, which must contain a **copy** (never a
@@ -39,12 +41,21 @@ symlink) of the repo folder.
       "options": { "mode": "think-reply-continue", "thinkingSeed": "I should answer...",
                    "seed": "I will give my answer:", "userSeed": "Continue" } },
     { "package": "<repo-root>\\subagent-abort" },
+    { "package": "<repo-root>\\subagent-abort-tui" },
     { "package": "<repo-root>\\subagent-status" },
     { "package": "<repo-root>\\subagent-message" },
     { "package": "<repo-root>\\subagent-sidebar-tree" }
-  ]
+  ],
+  "keybinds": {
+    "app.exit": "ctrl+c,<leader>q"
+  }
 }
 ```
+
+`subagent-abort-tui` claims `ctrl+d` (default `app.exit`), so the
+`keybinds.app.exit` override above is what makes `ctrl+d` stop exiting the app.
+Override its own shortcut with
+`{ "keybinds": { "subagent.abort": "..." } }`.
 
 Keep each plugin's existing entry (especially `prefill`'s `options` and
 `always-background`'s `exclude`) intact when re-registering. If
@@ -133,6 +144,7 @@ node keep-awake/test/keep-awake.test.mjs
 
 - `subagent-sidebar-tree` adapts to the host: a right-pane panel on stock v2.0.22, the 42-col core sidebar on a patched/ungated build.
 - `subagent-abort` registers the `abort_subagent` tool, which interrupts the caller's own descendant subagent sessions (one by `sessionID`, or all with `all: true`) and returns the aborted sessionIDs.
+- `subagent-abort-tui` adds `ctrl+d` / `/abort` to abort the child subagent session currently in view. Child-only: on a main session (no `parentID`) both do nothing. A `keybinds` override (`"app.exit": "ctrl+c,<leader>q"`) is what makes `ctrl+d` stop exiting the app.
 - `subagent-message` registers the `message_agent` tool, which sends a message along a single direct lineage edge only — to the caller's parent or one of its direct children. Siblings, non-descendants, grandchildren, and level-skips to a root are rejected. A running/waiting target is steered; an idle target is queued. Recipients treat inter-agent content as untrusted.
 - `subagent-status` defaults to `summary` mode (state + a 2-4 sentence LLM summary). Pass `mode: "state"` for a cheap status check (`running`/`idle`/`waiting`/`finished`) with no LLM call.
 - `always-background` forces `background: true` on every tool call except those in its `exclude` list (default `["shell", "subagent"]`, which keep their own user-controlled `background` input).
