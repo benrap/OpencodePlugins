@@ -25,7 +25,13 @@ import { expect, test } from "bun:test"
 import { RGBA } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import type { Context } from "@opencode/plugin/tui/context"
-import { openSubagent, SIDEBAR_CONTENT_CLAIM, SubagentSidebar } from "../tui"
+import {
+  openSubagent,
+  resetShowFinished,
+  SIDEBAR_CONTENT_CLAIM,
+  SubagentSidebar,
+  toggleShowFinished,
+} from "../tui"
 
 const WIDTH = 140
 const HEIGHT = 30
@@ -40,7 +46,8 @@ type MockSession = {
   parentID?: string
   agent?: string
   title?: string
-  time: { updated: number }
+  outcome?: "succeeded" | "failed" | "interrupted"
+  time: { created?: number; updated: number }
   location?: unknown
 }
 
@@ -49,6 +56,16 @@ const SESSIONS: MockSession[] = [
   { id: "ses_child", parentID: "ses_root", agent: "explore", title: "Child", time: { updated: 40 } },
   { id: "ses_sibling", parentID: "ses_root", agent: "general", title: "Sibling", time: { updated: 30 } },
   { id: "ses_grand", parentID: "ses_child", agent: "plan", title: "Grandchild", time: { updated: 50 } },
+  // An OLD terminal subagent (spawned/updated long before `Date.now()`, so it is
+  // outside the 60s recent window): hidden by default, revealed by the toggle.
+  {
+    id: "ses_finished",
+    parentID: "ses_root",
+    agent: "reviewer",
+    title: "Finished",
+    outcome: "succeeded",
+    time: { created: 5, updated: 5 },
+  },
 ]
 
 /**
@@ -83,7 +100,9 @@ function mockContext(currentSessionID: string, sessions: MockSession[] = SESSION
         list: () => sessions,
         get: (id: string) => byID.get(id),
         root: () => sessions.find((session) => !session.parentID)?.id ?? "ses_root",
-        status: () => "running",
+        // A session with a terminal outcome reports "idle" activity so its
+        // status resolves to done/failed/stopped; everything else is running.
+        status: (id: string) => (byID.get(id)?.outcome ? "idle" : "running"),
         sync: async () => {},
         message: { list: () => [], sync: async () => {} },
       },
@@ -335,6 +354,37 @@ test("root/MAIN row renders when it is the only entry (no subagents)", async () 
     expect(lineIndexOf(frame, "build")).toBeGreaterThanOrEqual(0)
     expect(columnOf(frame, "build")).toBeGreaterThanOrEqual(sidebar.x)
   } finally {
+    app.renderer.destroy()
+  }
+})
+
+/**
+ * Done/interrupted toggle: an OLD terminal subagent (outside the 60s recent
+ * window) is hidden by default, revealed by the exported toggle handler, and
+ * hidden again when toggled back. The button label flips `Show done`/`Hide done`.
+ */
+test("done/interrupted toggle: old finished session hidden by default, shown after toggle", async () => {
+  resetShowFinished()
+  const app = await render("ses_child")
+  try {
+    let frame = app.captureCharFrame()
+    // Button label present; the old finished session is NOT rendered.
+    expect(frame).toContain("Show done")
+    expect(frame).not.toContain("reviewer")
+
+    toggleShowFinished()
+    await app.renderOnce()
+    frame = app.captureCharFrame()
+    expect(frame).toContain("Hide done")
+    expect(frame).toContain("reviewer")
+
+    toggleShowFinished()
+    await app.renderOnce()
+    frame = app.captureCharFrame()
+    expect(frame).toContain("Show done")
+    expect(frame).not.toContain("reviewer")
+  } finally {
+    resetShowFinished()
     app.renderer.destroy()
   }
 })

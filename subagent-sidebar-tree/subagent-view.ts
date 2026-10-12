@@ -4,7 +4,40 @@ export type SubagentSession = {
   agent?: string
   title?: string
   outcome?: "succeeded" | "failed" | "interrupted"
-  time: { updated: number }
+  time: { created?: number; updated: number }
+}
+
+/**
+ * A usable timestamp: a finite, non-negative number. `undefined`/`NaN`/
+ * `Infinity`/negative values are rejected so comparators stay well-defined.
+ */
+function finiteTime(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * Spawn timestamp used for ordering: a finite `time.created` when present, else
+ * a finite `time.updated`, else `0`. NEVER returns `NaN`/`Infinity`, so the
+ * comparator is always well-defined even for malformed sessions.
+ */
+export function spawnTime(session: Pick<SubagentSession, "time">): number {
+  return finiteTime(session?.time?.created) ?? finiteTime(session?.time?.updated) ?? 0
+}
+
+/**
+ * Newest-spawn-first ordering, used at EVERY level of the tree.
+ *
+ * Primary key `spawnTime` DESC (falling back to `time.updated` when `created` is
+ * absent), then `time.updated` DESC, then `id` ASC. The extra keys make the
+ * order fully deterministic for equal timestamps and independent of the input
+ * array order. Replaces the old last-activity (`time.updated`) ordering.
+ */
+export function compareSpawnOrder(left: SubagentSession, right: SubagentSession): number {
+  const bySpawn = spawnTime(right) - spawnTime(left)
+  if (bySpawn !== 0) return bySpawn
+  const byUpdated = (finiteTime(right?.time?.updated) ?? 0) - (finiteTime(left?.time?.updated) ?? 0)
+  if (byUpdated !== 0) return byUpdated
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
 }
 
 export type SubagentStatus = "running" | "waiting" | "idle" | "done" | "failed" | "stopped"
@@ -52,7 +85,7 @@ export function descendantSessions(sessions: readonly SubagentSession[], rootID:
     pending.push(...(children.get(session.id) ?? []))
   }
 
-  return descendants.sort((left, right) => right.time.updated - left.time.updated)
+  return descendants.sort(compareSpawnOrder)
 }
 
 /** A session map keyed by id, or a plain session list. */
@@ -240,14 +273,31 @@ export function visibleSubagents(
   return sessions.filter((session) => isVisibleSubagent(session, activityOf(session.id), now, windowMs))
 }
 
+/** Options for `visibleSubagentIDs`. */
+export type VisibleSubagentOptions = {
+  /**
+   * When true, keep EVERY terminal session (`done`/`failed`/`stopped`) for as
+   * long as it exists, ignoring the recent window. `idle` sessions are still
+   * never kept. Default false = exactly the historical behaviour.
+   */
+  includeFinished?: boolean
+}
+
+/** Terminal outcomes that the `includeFinished` toggle reveals. */
+function isTerminalStatus(status: SubagentStatus): boolean {
+  return status === "done" || status === "failed" || status === "stopped"
+}
+
 /**
  * IDs that should be shown below `rootID`.
  *
  * Base visibility is per-session (`isVisibleSubagent`): running, or terminal
- * within the recent window. On top of that, every ancestor of a still-running
- * session is kept even when that ancestor finished long ago, so a running
- * descendant stays nested under its (possibly `done`) parent instead of being
- * promoted or dropped. `rootID` itself is never included.
+ * within the recent window. With `options.includeFinished`, every terminal
+ * session is kept regardless of the window (but never an `idle` one). On top of
+ * that, every ancestor of a still-running session is kept even when that
+ * ancestor finished long ago, so a running descendant stays nested under its
+ * (possibly `done`) parent instead of being promoted or dropped. `rootID`
+ * itself is never included.
  */
 export function visibleSubagentIDs(
   sessions: readonly SubagentSession[],
@@ -255,13 +305,23 @@ export function visibleSubagentIDs(
   activityOf: (sessionID: string) => "idle" | "running" | "waiting",
   now: number,
   windowMs = RECENT_WINDOW_MS,
+  options: VisibleSubagentOptions = {},
 ): Set<string> {
   const byId = new Map(sessions.map((session) => [session.id, session]))
   const keep = new Set<string>()
+  const includeFinished = options.includeFinished === true
 
-  // base: running, waiting, or terminal within the recent window
+  // base: running, waiting, or terminal within the recent window; with
+  // `includeFinished`, terminal sessions are kept unconditionally.
   for (const session of sessions) {
-    if (isVisibleSubagent(session, activityOf(session.id), now, windowMs)) keep.add(session.id)
+    const activity = activityOf(session.id)
+    if (isVisibleSubagent(session, activity, now, windowMs)) {
+      keep.add(session.id)
+      continue
+    }
+    if (includeFinished && isTerminalStatus(subagentStatus(session, activity))) {
+      keep.add(session.id)
+    }
   }
 
   // keep ancestors of every active (running or waiting) session so an active
@@ -322,7 +382,7 @@ type TreeNode = { session: SubagentSession; children: TreeNode[] }
 /**
  * Flatten the descendant sessions below `rootID` into a depth-first tree.
  *
- * Sibling buckets are sorted by `time.updated` DESC. Connectors are computed
+ * Sibling buckets are sorted by spawn time DESC (`compareSpawnOrder`). Connectors are computed
  * over the VISIBLE structure only: a node's `├─`/`└─` and the ancestor `│`
  * columns reflect its visible siblings, never invisible ones. An invisible
  * intermediate is removed and its visible descendants are promoted to the
@@ -345,7 +405,7 @@ export function subagentTree(
     children.set(session.parentID, siblings)
   }
   for (const siblings of children.values()) {
-    siblings.sort((left, right) => right.time.updated - left.time.updated)
+    siblings.sort(compareSpawnOrder)
   }
 
   const visited = new Set<string>()

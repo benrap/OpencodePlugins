@@ -11,7 +11,8 @@ sidebar as a nested tree.
 ## Features
 
 - Nested tree of descendant subagent sessions with Unicode box-drawing
-  connectors (`├─`, `└─`, `│`), sorted by most-recent activity.
+  connectors (`├─`, `└─`, `│`), sorted by **spawn time, newest first** at every
+  level (recursively).
 - Per-agent colors with a deterministic fallback palette, plus status labels
   (`running`, `done`, `failed`, `stopped`).
 - Two-line rows: session label + status on the first line, task/title preview on
@@ -19,9 +20,22 @@ sidebar as a nested tree.
 - Running sessions are always visible; finished sessions linger briefly
   (60s window); running descendants keep their finished ancestors visible so the
   tree stays connected.
+- A clickable **`Show done (N)` / `Hide done`** button in the tree header toggles
+  whether **done/failed/interrupted** (all terminal outcomes) sessions stay
+  visible past the 60s window. `N` is the number of terminal sessions currently
+  hidden. Default off, in-memory only (reset on every activation).
 - Collapsible: shows up to 8 subagents inline with a `+N more` expander and a
   scrollable expanded view.
 - Click a row to open that subagent session.
+
+### Ordering
+
+Siblings at every level are ordered by spawn time descending: a session's
+`time.created` when the host provides it, otherwise its `time.updated`. Ties
+break by `time.updated` descending, then by session id ascending, so the order is
+fully deterministic. The order is independent of the 60s visibility window and of
+the `Show done` toggle: turning finished sessions on/off only changes which rows
+are shown, never their order.
 
 ## Install
 

@@ -15,6 +15,7 @@ import {
   resolveMutedColor,
   ROW_SEPARATOR,
   shorten,
+  spawnTime,
   stableHash,
   subagentStatus,
   subagentTree,
@@ -24,11 +25,14 @@ import {
   visibleSubagents,
 } from "../subagent-view.ts"
 
-const s = (id, parentID, outcome, updated) => ({
+// `created` is the SPAWN time (the primary ordering key); `updated` is the last
+// activity. Both optional in practice: when `created` is absent the ordering
+// falls back to `updated`.
+const s = (id, parentID, outcome, updated, created) => ({
   id,
   parentID,
   outcome,
-  time: { updated },
+  time: { created, updated },
 })
 
 const activityMap = (map) => (id) => map[id] ?? "idle"
@@ -52,25 +56,35 @@ check("(b) idle child is dropped", () => {
   assert.deepEqual(kept, [])
 })
 
-check("(c) running grandchild is kept via descendantSessions", () => {
+check("(c) running grandchild is kept via descendantSessions (spawn-time order)", () => {
+  // SPAWN time (created) is the ordering key now: the child spawned LAST, so it
+  // sorts FIRST even though the grandchild was updated more recently. This is a
+  // DELIBERATE update of the old activity-order assertion (was
+  // ["grandchild", "child"]).
   const all = [
-    s("child", "root", undefined, 10),
-    s("grandchild", "child", undefined, 11),
+    s("child", "root", undefined, 10, 20),
+    s("grandchild", "child", undefined, 11, 5),
   ]
   const descendants = descendantSessions(all, "root")
-  assert.deepEqual(descendants.map((x) => x.id), ["grandchild", "child"])
+  assert.deepEqual(descendants.map((x) => x.id), ["child", "grandchild"])
   const kept = activeSubagents(descendants, activityMap({ grandchild: "running" }))
   assert.deepEqual(kept.map((x) => x.id), ["grandchild"])
 })
 
-check("(d) mixed set yields only running, in time-descending order", () => {
+check("(d) mixed set yields only running, in spawn-time (newest-first) order", () => {
+  // created (spawn) is deliberately the OPPOSITE of updated (activity): the old
+  // activity order would have been ["c", "a"], the new spawn-time order is
+  // ["a", "c"]. DELIBERATE update of the old activity-order assertion.
   const all = [
-    s("a", "root", undefined, 30),
-    s("b", "root", "succeeded", 20),
-    s("c", "root", undefined, 10),
-    s("d", "root", "failed", 5),
+    s("a", "root", undefined, 10, 40),
+    s("b", "root", "succeeded", 20, 30),
+    s("c", "root", undefined, 30, 20),
+    s("d", "root", "failed", 5, 10),
   ]
-  const kept = activeSubagents(all, activityMap({ a: "running", c: "running" }))
+  const kept = activeSubagents(
+    descendantSessions(all, "root"),
+    activityMap({ a: "running", c: "running" }),
+  )
   assert.deepEqual(kept.map((x) => x.id), ["a", "c"])
 })
 
@@ -954,6 +968,106 @@ check("tui.tsx renders the shared ROW_SEPARATOR, never a hardcoded spaced litera
   assert.equal(src.includes('" · "'), false)
   const uses = src.match(/\{ROW_SEPARATOR\}/g) ?? []
   assert.ok(uses.length >= 2, `expected >=2 ROW_SEPARATOR spans, found ${uses.length}`)
+})
+
+// -------------------------------------- (k) spawn-time ordering + done toggle
+check("spawnTime: prefers finite created, else updated, else 0", () => {
+  assert.equal(spawnTime({ time: { created: 5, updated: 100 } }), 5)
+  assert.equal(spawnTime({ time: { created: undefined, updated: 7 } }), 7)
+  assert.equal(spawnTime({ time: { created: undefined, updated: undefined } }), 0)
+})
+
+check("spawnTime: undefined/NaN/negative/Infinity never yield NaN", () => {
+  assert.equal(spawnTime({ time: { created: undefined, updated: undefined } }), 0)
+  assert.equal(spawnTime({ time: { created: NaN, updated: NaN } }), 0)
+  assert.equal(spawnTime({ time: { created: -5, updated: -5 } }), 0)
+  // Infinity is not finite -> skipped; a valid updated is used instead.
+  assert.equal(spawnTime({ time: { created: Infinity, updated: 3 } }), 3)
+  // A negative created falls through to a valid updated.
+  assert.equal(spawnTime({ time: { created: -5, updated: 9 } }), 9)
+  // Junk of every shape stays finite.
+  for (const time of [undefined, {}, { created: "x" }, { updated: NaN }, { created: null }]) {
+    const value = spawnTime({ time })
+    assert.ok(Number.isFinite(value), `spawnTime must be finite, got ${value}`)
+  }
+})
+
+check("spawn-time DESC is recursive (root siblings AND nested siblings)", () => {
+  const all = [
+    s("r1", "root", undefined, 10, 10),
+    s("r2", "root", undefined, 20, 20),
+    s("r1c1", "r1", undefined, 1, 1),
+    s("r1c2", "r1", undefined, 2, 2),
+  ]
+  const descendants = descendantSessions(all, "root")
+  assert.deepEqual(descendants.map((x) => x.id), ["r2", "r1", "r1c2", "r1c1"])
+  const tree = subagentTree(all, "root", () => true)
+  assert.deepEqual(tree.map((n) => n.session.id), ["r2", "r1", "r1c2", "r1c1"])
+  // nested siblings each ordered by created DESC (r1c2 created 2 > r1c1 created 1)
+  assert.deepEqual(
+    tree.filter((n) => n.depth === 1).map((n) => n.session.id),
+    ["r1c2", "r1c1"],
+  )
+})
+
+check("sort is independent of updated: older spawn stays below even with newer activity", () => {
+  const all = [
+    s("old-created-recent-activity", "root", undefined, 1000, 10),
+    s("new-created-stale-activity", "root", undefined, 1, 900),
+  ]
+  const tree = subagentTree(all, "root", () => true)
+  assert.deepEqual(tree.map((n) => n.session.id), [
+    "new-created-stale-activity",
+    "old-created-recent-activity",
+  ])
+})
+
+check("ties are deterministic regardless of input order (spawn DESC, updated DESC, id ASC)", () => {
+  const build = (order) => subagentTree(order, "root", () => true).map((n) => n.session.id)
+  const a = s("a", "root", undefined, 5, 5)
+  const b = s("b", "root", undefined, 5, 5)
+  const c = s("c", "root", undefined, 5, 5)
+  assert.deepEqual(build([c, a, b]), ["a", "b", "c"])
+  assert.deepEqual(build([b, c, a]), ["a", "b", "c"])
+  // A higher updated wins before the id tie-break.
+  const d = s("d", "root", undefined, 9, 5)
+  const e = s("e", "root", undefined, 8, 5)
+  assert.deepEqual(build([e, d]), ["d", "e"])
+})
+
+check("visibleSubagentIDs({ includeFinished: true }) keeps OLD terminal sessions, never idle", () => {
+  const now = 1_000_000
+  const all = [
+    s("done", "root", "succeeded", 0),
+    s("failed", "root", "failed", 0),
+    s("stopped", "root", "interrupted", 0),
+    s("idle", "root", undefined, 0),
+  ]
+  const ids = visibleSubagentIDs(all, "root", activityMap({}), now, RECENT_WINDOW_MS, {
+    includeFinished: true,
+  })
+  assert.ok(ids.has("done"), "old succeeded must be kept when includeFinished")
+  assert.ok(ids.has("failed"), "old failed must be kept when includeFinished")
+  assert.ok(ids.has("stopped"), "old interrupted must be kept when includeFinished")
+  assert.equal(ids.has("idle"), false, "idle is never kept")
+})
+
+check("visibleSubagentIDs default (and includeFinished:false) is exactly today's behaviour", () => {
+  const now = 1_000_000
+  const all = [
+    s("old-done", "root", "succeeded", now - 120_000),
+    s("fresh-done", "root", "succeeded", now - 30_000),
+    s("idle", "root", undefined, now),
+  ]
+  const byDefault = visibleSubagentIDs(all, "root", activityMap({}), now)
+  assert.equal(byDefault.has("old-done"), false)
+  assert.ok(byDefault.has("fresh-done"))
+  assert.equal(byDefault.has("idle"), false)
+
+  const explicitFalse = visibleSubagentIDs(all, "root", activityMap({}), now, RECENT_WINDOW_MS, {
+    includeFinished: false,
+  })
+  assert.deepEqual([...explicitFalse].sort(), [...byDefault].sort())
 })
 
 console.log(results.join("\n"))
