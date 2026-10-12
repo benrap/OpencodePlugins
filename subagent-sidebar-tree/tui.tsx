@@ -12,6 +12,7 @@ import {
   descendantSessions,
   formatContextUsage,
   latestTaskDescription,
+  RECENT_WINDOW_MS,
   resolveBaseColor,
   resolveMutedColor,
   ROW_SEPARATOR,
@@ -111,6 +112,27 @@ const sidebarRenderedSessions = new Set<string>()
  */
 export function resetSidebarRenderTracking(): void {
   sidebarRenderedSessions.clear()
+}
+
+/**
+ * Whether terminal (done/failed/stopped) subagent sessions stay visible past the
+ * recent window. In-memory only: reset to off on every activation. Toggled by
+ * the clickable button in the tree header (see `toggleShowFinished`).
+ */
+const [showFinished, setShowFinished] = createSignal(false)
+
+/**
+ * The tree-header button's click handler, exported so the rendered tests can
+ * drive the toggle directly without synthesizing a mouse event (same pattern as
+ * `openSubagent`). Flips the finished-session visibility on/off.
+ */
+export function toggleShowFinished(): void {
+  setShowFinished((value) => !value)
+}
+
+/** Test/debug hook: reset the finished-session toggle to off (the default). */
+export function resetShowFinished(): void {
+  setShowFinished(false)
 }
 
 /**
@@ -502,6 +524,7 @@ function SidebarSubagents(props: {
   const [expanded, setExpanded] = createSignal(false)
   const [moreHovered, setMoreHovered] = createSignal(false)
   const [collapseHovered, setCollapseHovered] = createSignal(false)
+  const [finishedHovered, setFinishedHovered] = createSignal(false)
   const sessions = createMemo(() =>
     descendantSessions(context.data.session.list(), props.sessionID),
   )
@@ -511,6 +534,8 @@ function SidebarSubagents(props: {
       props.sessionID,
       (sessionID) => context.data.session.status(sessionID),
       now(),
+      RECENT_WINDOW_MS,
+      { includeFinished: showFinished() },
     ),
   )
   const nodes = createMemo(() =>
@@ -519,6 +544,21 @@ function SidebarSubagents(props: {
   const displayedNodes = createMemo(() =>
     expanded() ? nodes() : nodes().slice(0, MAX_VISIBLE_SUBAGENTS),
   )
+
+  // How many terminal (done/failed/stopped) descendants the toggle would reveal
+  // right now: terminal sessions that are NOT currently visible. Used as the
+  // count in the `Show done (N)` label; always 0 while the toggle is on.
+  const hiddenFinishedCount = createMemo(() => {
+    if (showFinished()) return 0
+    let count = 0
+    for (const session of sessions()) {
+      const status = subagentStatus(session, context.data.session.status(session.id))
+      if ((status === "done" || status === "failed" || status === "stopped") && !visible().has(session.id)) {
+        count += 1
+      }
+    }
+    return count
+  })
 
   // The family root (MAIN/ROOT agent) is rendered as a real tree row ABOVE the
   // descendant rows, flush-left (empty prefix). It uses the same `SubagentRow`,
@@ -582,6 +622,29 @@ function SidebarSubagents(props: {
         paddingRight={props.overlay ? 2 : 0}
         backgroundColor={props.overlay ? raisedBg() : undefined}
       >
+        {/* Clickable toggle for done/interrupted sessions, styled like the
+            `Collapse subagents` and `+N more` buttons. */}
+        <box flexDirection="row" paddingBottom={1}>
+          <box
+            border={true}
+            borderColor={context.theme.text.muted}
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor={
+              finishedHovered() ? raisedBg() : context.theme.background.base
+            }
+            onMouseOver={() => setFinishedHovered(true)}
+            onMouseOut={() => setFinishedHovered(false)}
+            onMouseDown={toggleShowFinished}
+          >
+            <text
+              fg={finishedHovered() ? context.theme.text.base : context.theme.text.muted}
+              wrapMode="none"
+            >
+              {showFinished() ? "Hide done" : `Show done (${hiddenFinishedCount()})`}
+            </text>
+          </box>
+        </box>
         <Show when={rootSession()}>
           <SubagentRow
             context={context}
@@ -850,6 +913,7 @@ export default Plugin.define({
     loggedPanelTrees.clear()
     loggedPanelWidths.clear()
     sidebarRenderedSessions.clear()
+    resetShowFinished()
 
     try {
       const initialRoute = context.ui.router.current()
