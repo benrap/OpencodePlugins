@@ -4,6 +4,18 @@ A runnable **Windows x64** build of OpenCode based on upstream v2.0.27 (tag `v2.
 
 ---
 
+## How to run it (TL;DR)
+
+1. **Prebuilt zip (simplest)** — download the `patched-v2.0.27` asset below, unzip it anywhere, and run `opencode.exe` from that folder.
+2. **PATH shim** — if you already use the `%USERPROFILE%\.opencode-patched\opencode.cmd` shim, **quit every running `opencode` process and relaunch**; `opencode` then resolves to the patched build. If the shim directory is missing from your `PATH`, re-run `scripts\switch-patched.ps1` (see [Install into PATH](#install-into-path-optional)).
+3. **Build from source** — see [Build from source](#build-from-source-optional).
+
+**Confirm which build you are on:** `opencode --version` → `opencode v2.0.27-patched`.
+
+**Roll back to stock:** `scripts\revert-patched.ps1` (removes the shim from `PATH`), or install the older `patched-v2.0.23` asset.
+
+---
+
 ## Download & run (Windows x64, no dependencies)
 
 **Direct download:**

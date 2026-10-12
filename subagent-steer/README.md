@@ -5,19 +5,24 @@ child/subagent session you are currently viewing.
 
 ## The gap this fills
 
-In OpenCode v2.0.22/23 the host **hides its own message prompt for child
+On **stock** OpenCode v2.0.27 the host **hides its own message prompt for child
 sessions**. In `packages/tui/src/routes/session/index.tsx` the composer is
 forced open for any session with a `parentID` and the normal `<Prompt>` is
 replaced with `{null}`:
 
 ```
-1458:  open={composer.open || (!!session()?.parentID && forms().length === 0)}
-1472:  <Match when={composer.open || (!!session()?.parentID && forms().length === 0)}>{null}</Match>
+1481:  open={composer.open || (!!session()?.parentID && forms().length === 0)}
+1495:  <Match when={composer.open || (!!session()?.parentID && forms().length === 0)}>{null}</Match>
 ```
 
 The backend already supports steering (prompt delivery defaults to `"steer"`),
 so the only thing missing is a TUI affordance to type a steer for the child you
 are viewing. This plugin adds one.
+
+> On the **patched** build (`patched-opencode`, patch `0003`) the host already
+> renders its normal `<Prompt>` for children as an inline steer composer, so the
+> gap is closed there and this plugin is mainly for **stock** opencode. It works
+> on both — see [Known limitations](#known-limitations).
 
 ## What it does
 
@@ -49,15 +54,15 @@ are viewing. This plugin adds one.
 
 The preferred design was a focusable single-line `<input>` in the
 `session.composer.top` slot that submits on Enter. That is **not achievable with
-the supported plugin API** on v2.0.23:
+the supported plugin API** on stock v2.0.27:
 
 1. For every child session the host forces its composer open — which pushes the
    mutually-exclusive keymap mode `"composer"`:
-   `routes/session/composer/index.tsx:63-67` (priority 1, `enabled: () => open`).
+   `routes/session/composer/index.tsx:72-82` (priority 1, `enabled: () => props.open`).
 2. In that mode the host binds exactly the keys an inline input needs:
    - `config/keybind.ts:247` — `composer.subagent.select: "return"` (Enter)
    - `config/keybind.ts:245-246` — `composer.subagent.up/down: "up"/"down"`
-   - `routes/session/composer/index.tsx:83` — `escape` closes the composer
+   - `routes/session/composer/index.tsx:79` — `escape` closes the composer
 3. The host keymap is registered with `renderer.keyInput.prependListener`
    (`@opentui/keymap/src/opentui.js:69-74`), so command bindings see a key
    **before** the focused renderable's `handleKeyPress`, and a matched binding
@@ -96,17 +101,23 @@ The default shortcut is configurable like any named command:
 
 ## Known limitations
 
-- **The host composer stays hidden for children.** This plugin does not restore
-  the host `<Prompt>`; it adds an out-of-band steer affordance instead.
-- **The steer prompt payload shape is `{ sessionID, parts: [{ type: "text",
-  text }] }`.** The plugin-facing API for `@opencode/plugin@2.0.12` is written
-  this way, but the v2.0.23 runtime client (`context.client`, wired at
-  `packages/tui/src/plugin/api.tsx:159` to the raw API) accepts
-  `{ sessionID, text, ... }` — see
-  `packages/client/src/promise/generated/client.ts:713-727`,
-  `packages/client/src/promise/generated/types.ts:4150`, and
-  `packages/schema/src/prompt-input.ts:29`. If the live build rejects `parts`,
-  `steer.ts` is the single place to change (send `{ sessionID, text }`).
+- **On the patched build the host already provides the child composer.** Patch
+  `0003` in `patched-opencode` renders the host `<Prompt>` for child sessions as
+  an inline steer composer (`packages/tui/src/routes/session/index.tsx`,
+  `packages/tui/src/component/prompt/index.tsx`), so this plugin's out-of-band
+  keybind + dialog affordance is mainly for **stock** opencode, where the host
+  composer stays hidden for children. The plugin still works on both: on the
+  patched build it adds a redundant hint and an alternative shortcut.
+- **The steer prompt payload is `{ sessionID, text }` — there is no `parts`
+  field.** At v2.0.27 the runtime client (`context.client`, wired at
+  `packages/tui/src/plugin/api.tsx:159` to the raw API) takes
+  `{ sessionID, text, ... }`, matching the plugin-facing `@opencode/plugin` API
+  (`context.client` is typed as `OpenCodeClient` in
+  `packages/plugin/src/tui/context.ts`) — see
+  `packages/client/src/promise/generated/client.ts:716-732`,
+  `packages/client/src/promise/generated/types.ts:4265`, and
+  `packages/schema/src/prompt-input.ts:29`. `steer.ts` already sends exactly
+  `{ sessionID, text }`; it is the single place to change if the shape changes.
 - Steering targets only the **child you are viewing**; there is no "send to
   main" shortcut.
 
