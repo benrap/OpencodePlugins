@@ -1,6 +1,6 @@
-# PATCHES.md — `opencode-patched` vs upstream OpenCode v2.0.23
+# PATCHES.md — `opencode-patched` vs upstream OpenCode v2.0.27
 
-Exact, per-file record of what this patch set changes relative to upstream **v2.0.23**. Nothing here is aspirational: the hunks below are the actual patch contents, and `0001`+`0002` together reproduce the `c212f31561` rebased source tree byte-for-byte (verified tree hash below), with `0003`, `0004`, `0005`, and `0006` applying additively on top.
+Exact, per-file record of what this patch set changes relative to upstream **v2.0.27**. Nothing here is aspirational: the hunks below are the actual patch contents, and the canonical combined diff [`patches/v2.0.27.patch`](./patches/v2.0.27.patch) reproduces the current patched source tree byte-for-byte (verified tree hash below). The six numbered patches (`0001`–`0006`) are the per-fix breakdown of the same changes; they originated as the `0001`+`0002` rebase on the earlier **v2.0.23** base (head `c212f31561`) with `0003`–`0006` applying additively on top, and now need two hand-merges plus one type-only test adaptation to apply to v2.0.27 (see ["How to apply"](#how-to-apply)).
 
 ---
 
@@ -25,11 +25,19 @@ What these patches actually do:
 
 | | |
 |---|---|
-| **Base commit** | `0fd7e2829449b052abf0078666669302923d77af` (tag `v2.0.23`) |
-| **Rebased head** | `c212f315615f2f6eeff6c706f54dd61153d6f5ba` (`c212f31561`) |
-| **Diff size** | 20 files, 328 insertions(+), 36 deletions(-) |
+| **Base commit** | `1f4d07a4a519185955ae8ab2ea3607805509e386` (tag `v2.0.27`) |
+| **Patched head** | `4ab1b29291081f2a87a723f1078bcd391b3ed265` (`4ab1b29291`) |
+| **Diff size** | 35 files, 1049 insertions(+), 79 deletions(-) |
 
-The 7 commits on top of the base (newest first):
+The current port is a single commit on top of the v2.0.27 base:
+
+```
+4ab1b29291 port: session waiting status + background interrupt patches onto v2.0.27
+```
+
+> **Port note.** Applying `0001`–`0006` in order to v2.0.27 is **not fully automatic**: two hunks need a hand-merge and one type-only test adaptation, and `0005` must be applied **after** `0002` and `0004` (it references text they introduce). The canonical combined `patches/v2.0.27.patch` avoids all of this. Details in ["How to apply"](#how-to-apply).
+
+The six numbered files originated from an earlier rebase of `0001`+`0002` onto the **v2.0.23** base (`0fd7e2829449b052abf0078666669302923d77af`), head `c212f315615f2f6eeff6c706f54dd61153d6f5ba` (`c212f31561`), with `0003`–`0006` additive on top. That history is preserved below for reference:
 
 ```
 c212f31561 feat(tui): render the session sidebar for subagent sessions
@@ -1306,12 +1314,31 @@ AFTER
 
 ## How to apply
 
-Apply against a **clean upstream v2.0.23 checkout** (`0fd7e2829449b052abf0078666669302923d77af`), in order:
+### Canonical: the combined diff (recommended)
+
+`patches/v2.0.27.patch` is the exact combined diff of the current build
+(`git -C <patched-worktree> diff v2.0.27 patched-2.0.27`). Apply it to a clean
+upstream **v2.0.27** checkout:
 
 ```bash
 git clone https://github.com/sst/opencode opencode-verify
 cd opencode-verify
-git checkout 0fd7e2829449b052abf0078666669302923d77af   # tag v2.0.23
+git checkout 1f4d07a4a519185955ae8ab2ea3607805509e386   # tag v2.0.27
+
+git apply /path/to/patches/v2.0.27.patch
+```
+
+It applies cleanly (all **35** files, no rejects; `git apply --check` succeeds)
+and reproduces the patched `4ab1b29291` tree exactly.
+
+### Per-fix breakdown: `0001`–`0006` in order
+
+The six numbered files are the per-fix breakdown of the same changes. Apply them
+**in order** to a clean upstream **v2.0.27** checkout
+(`1f4d07a4a519185955ae8ab2ea3607805509e386`, tag `v2.0.27`):
+
+```bash
+git checkout 1f4d07a4a519185955ae8ab2ea3607805509e386   # tag v2.0.27
 
 git apply /path/to/patches/0001-remove-parentid-sidebar-gate.patch
 git apply /path/to/patches/0002-session-waiting-status-tick-fix.patch
@@ -1321,9 +1348,57 @@ git apply /path/to/patches/0005-interrupt-foreground-only.patch
 git apply /path/to/patches/0006-abort-does-not-resume.patch
 ```
 
-`0001` and `0002` apply cleanly (all 20 files, no fuzz, no rejects) and reproduce the `c212f31561` tree; `0003` then applies cleanly on top (the route/context/app/prompt changes plus its regression test), `0004` applies cleanly on top of that, and `0005` applies cleanly on top of `0001`–`0004`. `0004` touches only `packages/core` (`execution.ts` plus its test), so — like `0003` — it is additive and does not modify any `0001`/`0002` file or the `0003` TUI files. `0005` touches `packages/protocol`, `packages/server`, `packages/core` (`session.ts`, `session/execution.ts`, `session/session.ts`, `location-activity.ts`), the four generated client files, and three core tests — it contains no `packages/tui` hunks, so it too leaves the `0003` TUI changes untouched. `0006` applies cleanly on top of `0001`–`0005` and touches only `packages/core` (`session/subagent-completion.ts`, `tool/plugin/shell.ts`, and the two tests `session-execution.test.ts` + `tool-shell.test.ts`), so it too is additive.
+Applying them in order to v2.0.27 is **not fully automatic**:
 
-**Reproduction proof.** After applying `0001`+`0002` and staging the result, the resulting Git tree is identical to the rebased head's tree:
+- **`0005` must be applied after `0002` and `0004`** — it references text they
+  introduce.
+- `packages/client/src/solid/data.ts` — widen `DataSessionStatus` to
+  `"idle" | "running" | "waiting"`; upstream v2.0.27 inserted a new
+  `DataPendingStatus` block nearby, so `0002`'s hunk needs a **hand-merge**.
+- `packages/core/src/session/subagent-job.ts` — upstream commit `ee0e614221`
+  (#54072) added `notify` + `Effect.setContext(context)`, while `0002` moved the
+  inline `run:` body into
+  `SubagentCompletion.finalText({ sessions, jobs, sessionID: recovery.childSessionID })`;
+  the two must coexist, so this hunk needs a **hand-merge**.
+- `packages/core/test/location-activity.test.ts` — `jobs.get` now returns
+  `Info | undefined`, so the assertion uses `?.status` (a **type-only test
+  adaptation**).
+
+Use plain `git apply` (not `--3way`) in a checkout with `core.autocrlf=true`.
+
+`0004` touches only `packages/core` (`execution.ts` plus its test), so — like
+`0003` — it is additive and does not modify any `0001`/`0002` file or the `0003`
+TUI files. `0005` touches `packages/protocol`, `packages/server`, `packages/core`
+(`session.ts`, `session/execution.ts`, `session/session.ts`,
+`location-activity.ts`), the four generated client files, and three core tests —
+it contains no `packages/tui` hunks, so it too leaves the `0003` TUI changes
+untouched. `0006` touches only `packages/core`
+(`session/subagent-completion.ts`, `tool/plugin/shell.ts`, and the two tests
+`session-execution.test.ts` + `tool-shell.test.ts`), so it too is additive.
+
+### Reproduction proof
+
+**Current build (combined patch).** Applying `patches/v2.0.27.patch` to a clean
+v2.0.27 checkout and staging the result yields the patched head's tree exactly:
+
+```
+git apply /path/to/patches/v2.0.27.patch
+git add -A
+git write-tree
+# => 287e2f0c6ea5bef8f3cff6d66e8700d23e055462
+
+git -C <patched-worktree> rev-parse '4ab1b29291081f2a87a723f1078bcd391b3ed265^{tree}'
+# => 287e2f0c6ea5bef8f3cff6d66e8700d23e055462
+```
+
+The tree hash `287e2f0c6ea5bef8f3cff6d66e8700d23e055462` is the same from both
+routes, so `patches/v2.0.27.patch` exactly reproduces the `4ab1b29291` tree —
+nothing more, nothing less. `git apply --check` also succeeds against a clean
+v2.0.27 checkout.
+
+**Historical (`0001`+`0002` on the v2.0.23 rebase).** After applying `0001`+`0002`
+to the earlier **v2.0.23** base and staging the result, the resulting Git tree is
+identical to that rebase's head tree:
 
 ```
 git add -A
@@ -1334,4 +1409,8 @@ git -C <rebased-clone> rev-parse 'c212f315615f2f6eeff6c706f54dd61153d6f5ba^{tree
 # => 934165bfed50ce088418d0c4ac1c15a44e9e8762
 ```
 
-The tree hash `934165bfed50ce088418d0c4ac1c15a44e9e8762` is the same from both routes, so `0001`+`0002` exactly reproduce the `c212f31561` tree — nothing more, nothing less. This proof covers `0001`+`0002` **only**: `0003` and `0004` are additive patches applied on top of that tree and are deliberately not folded into this hash.
+The tree hash `934165bfed50ce088418d0c4ac1c15a44e9e8762` is the same from both
+routes, so `0001`+`0002` exactly reproduce the `c212f31561` tree — nothing more,
+nothing less. This historical proof covers `0001`+`0002` **only**: `0003` and
+`0004` are additive patches applied on top of that tree and are deliberately not
+folded into this hash.
