@@ -8,7 +8,7 @@ A runnable **Windows x64** build of OpenCode based on upstream v2.0.27 (tag `v2.
 
 **Direct download:**
 
-<https://github.com/benrap/OpencodePlugins/releases/download/patched-v2.0.23/opencode-patched-windows-x64.zip>
+<https://github.com/benrap/OpencodePlugins/releases/download/patched-v2.0.27/opencode-patched-windows-x64.zip>
 
 **Steps:**
 
@@ -19,9 +19,9 @@ A runnable **Windows x64** build of OpenCode based on upstream v2.0.27 (tag `v2.
 
 No `bun`, no `node`, and no source tree are required — the zip contains a self-contained binary.
 
-> **Note:** the prebuilt zip above is the previous **`patched-v2.0.23`** release
-> (built from the v2.0.23 base). There is no prebuilt v2.0.27 artifact yet; to
-> reproduce the current v2.0.27-based build, apply
+> **Note:** the prebuilt zip above is the **`patched-v2.0.27`** release, built from
+> the upstream v2.0.27 base. The previous **`patched-v2.0.23`** release is still
+> available for rollback. To reproduce this build from source, apply
 > [`patches/v2.0.27.patch`](./patches/v2.0.27.patch) or build from source (below).
 
 **Notes:**
