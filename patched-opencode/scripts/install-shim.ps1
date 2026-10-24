@@ -64,8 +64,6 @@ function Resolve-StandaloneBinary {
 function Resolve-CheckoutCli {
     param([string]$ShimDir)
 
-    $preferredBranch = 'benrap/session-waiting-status'
-
     # Explicit candidates first.
     $explicit = New-Object System.Collections.Generic.List[string]
     if ($env:OPENCODE_CHECKOUT) {
@@ -101,8 +99,10 @@ function Resolve-CheckoutCli {
     }
 
     if ($found.Count -gt 0) {
+        # Branch-neutral: use the most recently modified checkout. The branch is
+        # reported only for transparency; no branch name is preferred.
         $preferred = $found |
-            Sort-Object -Property @{ Expression = { if ($_.Branch -eq $preferredBranch) { 0 } else { 1 } } }, @{ Expression = { $_.LastWrite }; Descending = $true } |
+            Sort-Object -Property LastWrite -Descending |
             Select-Object -First 1
         Write-Host "Auto-detected patched checkout: $($preferred.Path) (branch '$($preferred.Branch)')" -ForegroundColor Cyan
         return $preferred.Path

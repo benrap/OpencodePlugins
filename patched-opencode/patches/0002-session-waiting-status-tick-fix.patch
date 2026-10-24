@@ -1,12 +1,13 @@
-# 0002: session "waiting" status + completion-tick fix.
-# End-to-end waiting status (schema/client/core/app/tui) plus suppression of the completion tick
-# while background work is outstanding. Excludes session-frame.tsx (see 0001).
-# Regenerated against opencode v2.0.23 (0fd7e2829449b052abf0078666669302923d77af).
+# 0002: keep a Session rendered busy while it settles with outstanding background work
+# (the waiting-status tick fix). Adds the "waiting" SessionStatus projection to the
+# app/client/schema layers, publishes it instead of a terminal while durable background
+# work is pending, and makes subagent final text wait for background acknowledgment.
+# Regenerated against opencode v2.1.4 (68bc26b7da1990ce10ffecfbc1e09eb13aa5d824).
 diff --git a/packages/app/src/composer/submit.test.ts b/packages/app/src/composer/submit.test.ts
-index 9c98efbc7c..ace9836124 100644
+index 85bb7ca..d0bdb6d 100644
 --- a/packages/app/src/composer/submit.test.ts
 +++ b/packages/app/src/composer/submit.test.ts
-@@ -99,7 +99,7 @@ function session(input: {
+@@ -107,7 +107,7 @@ function session(input: {
    calls: string[]
    prompt?: (value: Parameters<ComposerSession["data"]["session"]["prompt"]>[0]) => Promise<void>
    handoff?: ComposerSession["handoff"]
@@ -15,34 +16,42 @@ index 9c98efbc7c..ace9836124 100644
    current?: ComposerSession["current"]
    admitted?: (messageID: string) => boolean
    shell?: ComposerSession["api"]["shell"]
-@@ -324,7 +324,7 @@ describe("Composer submission", () => {
-     state.set(prompt)
+@@ -251,7 +251,7 @@ describe("Composer submission", () => {
+       const state = createMemoryComposerState({ prompt: "ship it" }).capture()
+       const committed = Promise.withResolvers<void>()
+       const handoffs: SessionMessageHandoff[] = []
+-      const statuses: ("idle" | "running")[] = []
++      const statuses: ("idle" | "running" | "waiting")[] = []
+ 
+       const target = session({
+         calls: [],
+@@ -398,7 +398,7 @@ describe("Composer submission", () => {
      state.context.add({ type: "file", path: "notes.md", description: "the failing version" })
      const attempts: string[] = []
+     const calls: string[] = []
 -    const statuses: ("idle" | "running")[] = []
 +    const statuses: ("idle" | "running" | "waiting")[] = []
      const first = Promise.withResolvers<void>()
      const second = Promise.withResolvers<void>()
  
 diff --git a/packages/app/src/session/model.ts b/packages/app/src/session/model.ts
-index ec000daf68..bff35b3787 100644
+index ec000da..47cfb04 100644
 --- a/packages/app/src/session/model.ts
 +++ b/packages/app/src/session/model.ts
 @@ -58,8 +58,10 @@ export function useSessionModel() {
  
    const status = createMemo(() => {
      const id = sessionID()
--
++    const current = id ? data.session.status(id) : undefined
+ 
 -    return id && data.session.status(id) === "running" ? { type: "busy" as const } : idle
-+    const value = id ? data.session.status(id) : undefined
-+    if (value === "running") return { type: "busy" as const }
-+    if (value === "waiting") return { type: "waiting" as const }
-+    return idle
++    if (current === "waiting") return { type: "waiting" as const }
++    return current === "running" ? { type: "busy" as const } : idle
    })
  
    const messages = createMemo(() => {
 diff --git a/packages/app/src/session/requests/background.ts b/packages/app/src/session/requests/background.ts
-index 2bb969cba1..3243713bde 100644
+index 6dfafda..4312203 100644
 --- a/packages/app/src/session/requests/background.ts
 +++ b/packages/app/src/session/requests/background.ts
 @@ -9,7 +9,7 @@ export function createSessionBackground(input: {
@@ -55,52 +64,48 @@ index 2bb969cba1..3243713bde 100644
  }) {
    const history = createMemo(() => {
 diff --git a/packages/app/src/shell/routes/session-ui-provider.tsx b/packages/app/src/shell/routes/session-ui-provider.tsx
-index d853e519f5..22e47a6482 100644
+index e17c307..6458b56 100644
 --- a/packages/app/src/shell/routes/session-ui-provider.tsx
 +++ b/packages/app/src/shell/routes/session-ui-provider.tsx
-@@ -62,10 +62,12 @@ export function SessionUIProvider(
-     session_status: Object.fromEntries(
-       data.session
+@@ -93,7 +93,11 @@ export function SessionUIProvider(
          .list()
--        .map((session) => [
--          session.id,
+         .map((session) => [
+           session.id,
 -          data.session.status(session.id) === "running" ? ({ type: "busy" } as const) : ({ type: "idle" } as const),
--        ]),
-+        .map((session) => {
-+          const status = data.session.status(session.id)
-+          if (status === "running") return [session.id, { type: "busy" } as const]
-+          if (status === "waiting") return [session.id, { type: "waiting" } as const]
-+          return [session.id, { type: "idle" } as const]
-+        }),
++          data.session.status(session.id) === "waiting"
++            ? ({ type: "waiting" } as const)
++            : data.session.status(session.id) === "running"
++              ? ({ type: "busy" } as const)
++              : ({ type: "idle" } as const),
+         ]),
      ),
      session_diff: {},
-   }))
 diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
-index 62a6395c9d..f8b3cdd9a2 100644
+index a0fa192..630daff 100644
 --- a/packages/client/src/promise/generated/types.ts
 +++ b/packages/client/src/promise/generated/types.ts
-@@ -387,6 +387,7 @@ export type SessionStatus =
+@@ -286,6 +286,7 @@ export type SessionStatus =
        next: number
      }
    | { type: "busy" }
 +  | { type: "waiting" }
  
- export type PtyTicketConnectToken = { ticket: string; expires_in: number }
+ export type PersistentPtyHandoff = { directory: string; instanceID: string; ticket: string; expiresAt: number }
  
 diff --git a/packages/client/src/solid/data.ts b/packages/client/src/solid/data.ts
-index 4a1666f88b..123f00b77b 100644
+index f96be5d..06bd758 100644
 --- a/packages/client/src/solid/data.ts
 +++ b/packages/client/src/solid/data.ts
-@@ -51,7 +51,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
+@@ -52,7 +52,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
  import type { SessionInbox } from "@opencode/schema/session-inbox"
  import { batch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
  
 -export type DataSessionStatus = "idle" | "running"
 +export type DataSessionStatus = "idle" | "running" | "waiting"
- type OpenCodeEventMap = { [Type in OpenCodeEvent["type"]]: Extract<OpenCodeEvent, { type: Type }> }
- 
- export type CreateDataInput = {
-@@ -1006,6 +1006,9 @@ export function createData(config: CreateDataInput) {
+ /**
+  * Where a pending user prompt stands relative to the runner: `starting` is promoted at the next idle boundary,
+  * `steering` waits for the next step boundary of an execution that already delivered input, `stranded` outlived an
+@@ -1056,6 +1056,9 @@ export function createData(config: CreateDataInput) {
            assistant.retry = { attempt: event.data.attempt, at: event.data.at, error: event.data.error }
          })
          return
@@ -110,8 +115,44 @@ index 4a1666f88b..123f00b77b 100644
        case "session.execution.started":
          setSessionActive(event.data.sessionID, "running")
          return
+diff --git a/packages/client/test/solid-data.test.ts b/packages/client/test/solid-data.test.ts
+index d2483e5..2aa9ad6 100644
+--- a/packages/client/test/solid-data.test.ts
++++ b/packages/client/test/solid-data.test.ts
+@@ -1137,6 +1137,31 @@ test.each([
+   }
+ })
+ 
++test("projects a waiting session status until execution settles", () => {
++  const setup = activityFixture(() => Response.json({ data: {} }))
++
++  try {
++    setup.emit({
++      id: "evt_waiting",
++      created: 1,
++      type: "session.status",
++      data: { sessionID: "ses_waiting", status: { type: "waiting" } },
++    })
++    expect(setup.data.session.status("ses_waiting")).toBe("waiting")
++    setup.emit({
++      id: "evt_waiting_done",
++      created: 2,
++      type: "session.execution.succeeded",
++      durable: { aggregateID: "ses_waiting", seq: 2, version: 1 },
++      data: { sessionID: "ses_waiting", reason: "user" },
++    })
++    expect(setup.data.session.status("ses_waiting")).toBe("idle")
++    expect(setup.data.session.message.list("ses_waiting").map((message) => message.type)).toEqual(["idle"])
++  } finally {
++    setup.dispose()
++  }
++})
++
+ test("ignores activity snapshots from an older connection", async () => {
+   const reads: ReturnType<typeof Promise.withResolvers<Response>>[] = []
+   const setup = activityFixture(() => {
 diff --git a/packages/core/src/job.ts b/packages/core/src/job.ts
-index 771c5a7972..d1c5cae965 100644
+index 7afc0f1..facf805 100644
 --- a/packages/core/src/job.ts
 +++ b/packages/core/src/job.ts
 @@ -63,6 +63,7 @@ type Active = {
@@ -122,9 +163,9 @@ index 771c5a7972..d1c5cae965 100644
    scope: Scope.Scope
  }
  
-@@ -134,6 +135,9 @@ export interface Interface {
-   readonly cancel: (id: string) => Effect.Effect<Info | undefined>
+@@ -135,6 +136,9 @@ export interface Interface {
    readonly pendingBackground: Effect.Effect<readonly Background[]>
+   readonly runningBackground: Effect.Effect<readonly Recovery[]>
    readonly completeBackground: (notificationID: SessionMessage.ID) => Effect.Effect<void>
 +  readonly awaitBackground: (notificationID: SessionMessage.ID) => Effect.Effect<void>
 +  readonly pendingFor: (sessionID: SessionSchema.ID) => Effect.Effect<readonly Background[]>
@@ -132,7 +173,7 @@ index 771c5a7972..d1c5cae965 100644
  }
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/Job") {}
-@@ -179,6 +183,7 @@ export const make = Effect.gen(function* () {
+@@ -180,6 +184,7 @@ export const make = Effect.gen(function* () {
    const kv = yield* KV.Service
    const state: State = {
      jobs: yield* SynchronizedRef.make(new Map()),
@@ -140,9 +181,24 @@ index 771c5a7972..d1c5cae965 100644
      scope: yield* Scope.Scope,
    }
  
-@@ -449,10 +454,34 @@ export const make = Effect.gen(function* () {
-     return recovered
-   }).pipe(Effect.withSpan("Job.pendingBackground"))
+@@ -463,6 +468,14 @@ export const make = Effect.gen(function* () {
+     SynchronizedRef.updateEffect(state.jobs, (jobs) =>
+       Effect.gen(function* () {
+         yield* kv.remove(`${backgroundPrefix}${notificationID}`)
++        const waiter = yield* SynchronizedRef.modify(state.deliveries, (waiters) => {
++          const deferred = waiters.get(notificationID)
++          if (!deferred) return [undefined, waiters] as const
++          const next = new Map(waiters)
++          next.delete(notificationID)
++          return [deferred, next] as const
++        })
++        if (waiter) yield* Deferred.succeed(waiter, undefined)
+         const entry = [...jobs].find(([, job]) => job.info.notificationID === notificationID)
+         if (!entry || entry[1].info.status === "running") return jobs
+         const next = new Map(jobs)
+@@ -472,6 +485,44 @@ export const make = Effect.gen(function* () {
+     ),
+   )
  
 +  /**
 +   * Outstanding durable background work owned by a Session: shell work belongs to the
@@ -160,36 +216,18 @@ index 771c5a7972..d1c5cae965 100644
 +    return (yield* pendingFor(sessionID)).length > 0
 +  })
 +
-   const completeBackground: Interface["completeBackground"] = Effect.fn("Job.completeBackground")((notificationID) =>
-     SynchronizedRef.updateEffect(state.jobs, (jobs) =>
-       Effect.gen(function* () {
-         yield* kv.remove(`${backgroundPrefix}${notificationID}`)
-+        const waiter = yield* SynchronizedRef.modify(state.deliveries, (waiters) => {
-+          const deferred = waiters.get(notificationID)
-+          if (!deferred) return [undefined, waiters] as const
-+          const next = new Map(waiters)
-+          next.delete(notificationID)
-+          return [deferred, next] as const
-+        })
-+        if (waiter) yield* Deferred.succeed(waiter, undefined)
-         const entry = [...jobs].find(([, job]) => job.info.notificationID === notificationID)
-         if (!entry || entry[1].info.status === "running") return jobs
-         const next = new Map(jobs)
-@@ -462,6 +491,27 @@ export const make = Effect.gen(function* () {
-     ),
-   )
- 
 +  /**
-+   * Resolves once a durable background notification has been admitted, which is
-+   * when its marker clears. Waiting on the job itself only observes settlement;
-+   * the wake-up notification is admitted asynchronously after that.
++   * Resolves once a durable background notification has been admitted, which is when its
++   * marker clears. Waiting on the job itself only observes settlement; the wake-up
++   * notification is admitted asynchronously after that.
 +   */
 +  const awaitBackground: Interface["awaitBackground"] = Effect.fn("Job.awaitBackground")(function* (notificationID) {
++    if (!(yield* kv.get(`${backgroundPrefix}${notificationID}`))) return
 +    const waiter = yield* SynchronizedRef.modifyEffect(
 +      state.deliveries,
 +      Effect.fnUntraced(function* (waiters) {
-+        // Marker read and waiter registration are atomic here; completeBackground
-+        // clears the marker before resolving, so no separate recheck is needed.
++        // Re-check the marker while waiter registration is serialized: completeBackground
++        // clears it under the same lock, so no wake-up can be lost between check and await.
 +        if (!(yield* kv.get(`${backgroundPrefix}${notificationID}`))) return [undefined, waiters] as const
 +        const existing = waiters.get(notificationID)
 +        if (existing) return [existing, waiters] as const
@@ -203,9 +241,9 @@ index 771c5a7972..d1c5cae965 100644
    return Service.of({
      get,
      start,
-@@ -472,6 +522,9 @@ export const make = Effect.gen(function* () {
-     cancel,
+@@ -483,6 +534,9 @@ export const make = Effect.gen(function* () {
      pendingBackground,
+     runningBackground,
      completeBackground,
 +    awaitBackground,
 +    pendingFor,
@@ -214,7 +252,7 @@ index 771c5a7972..d1c5cae965 100644
  })
  
 diff --git a/packages/core/src/session/execution.ts b/packages/core/src/session/execution.ts
-index eeed241ae1..14f0240b86 100644
+index fb7a9d3..fdf9118 100644
 --- a/packages/core/src/session/execution.ts
 +++ b/packages/core/src/session/execution.ts
 @@ -5,6 +5,7 @@ import { Bus } from "../bus.js"
@@ -225,36 +263,24 @@ index eeed241ae1..14f0240b86 100644
  import { makeGlobalNode } from "@opencode/util/effect/app-node"
  import { SessionEvent } from "./event.js"
  import { SessionRunCoordinator } from "./run-coordinator.js"
-@@ -122,12 +123,26 @@ export const layer = Layer.effect(
+@@ -119,6 +120,15 @@ export const layer = Layer.effect(
            Effect.gen(function* () {
              const outcome = terminal(exit, reason)
              if (outcome.type === "succeeded") {
 +              if (yield* jobs.awaiting(sessionID)) {
-+                // The turn is not complete: background work will resume it. Withhold the
-+                // terminal so clients keep the Session active (no tick) until that work
-+                // finishes. Recovery of a waiting turn is owned by its durable background
-+                // Job record, not the orphaned-claim sweep, so release the claim now
-+                // instead of leaving it to look like a turn that died mid-flight.
++                // The turn is not complete: outstanding background work will resume it.
++                // Publish `waiting` instead of a terminal so clients keep the Session active,
++                // and keep the execution claim on purpose — the turn is still in flight. The
++                // preserved claim is what the boot sweep resumes after recovering durable
++                // background markers (session/execution/restart.ts).
 +                yield* bus.publish(SessionStatusEvent.Status, { sessionID, status: { type: "waiting" } })
-+                yield* store.release(sessionID)
 +                return
 +              }
                yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
                return
              }
-             if (outcome.type === "interrupted") {
-               // Deliberate stops release the claim; shutdown keeps it for restart continuity.
--              if (outcome.reason !== "shutdown") yield* jobs.cancel(sessionID)
-+              if (outcome.reason !== "shutdown") {
-+                yield* jobs.cancel(sessionID)
-+                const pending = yield* jobs.pendingFor(sessionID)
-+                yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
-+              }
-               yield* bus.publish(
-                 SessionEvent.Execution.Interrupted,
-                 { sessionID, reason: outcome.reason },
 diff --git a/packages/core/src/session/execution/restart.ts b/packages/core/src/session/execution/restart.ts
-index dde3393018..c0c53f9c3f 100644
+index dde3393..c0c53f9 100644
 --- a/packages/core/src/session/execution/restart.ts
 +++ b/packages/core/src/session/execution/restart.ts
 @@ -171,16 +171,17 @@ export const layer = (options?: Options) =>
@@ -286,7 +312,7 @@ index dde3393018..c0c53f9c3f 100644
          yield* jobs.background(background.id)
          yield* jobs.wait({ id: background.id }).pipe(
 diff --git a/packages/core/src/session/subagent-completion.ts b/packages/core/src/session/subagent-completion.ts
-index 746bc5170e..b08f7217af 100644
+index 79a00e1..dbd690c 100644
 --- a/packages/core/src/session/subagent-completion.ts
 +++ b/packages/core/src/session/subagent-completion.ts
 @@ -4,6 +4,7 @@ import { Effect } from "effect"
@@ -297,7 +323,7 @@ index 746bc5170e..b08f7217af 100644
  
  export const NO_TEXT = "Subagent completed without a text response."
  
-@@ -17,6 +18,33 @@ export function text(message: SessionMessage.Info | undefined) {
+@@ -18,6 +19,33 @@ export function text(message: SessionMessage.Info | undefined) {
    )
  }
  
@@ -332,28 +358,28 @@ index 746bc5170e..b08f7217af 100644
    sessions: Pick<Session.Interface, "synthetic">,
    jobs: Pick<Job.Interface, "completeBackground">,
 diff --git a/packages/core/src/session/subagent-job.ts b/packages/core/src/session/subagent-job.ts
-index f8e7503fbd..5a21263269 100644
+index c64cb04..7088a09 100644
 --- a/packages/core/src/session/subagent-job.ts
 +++ b/packages/core/src/session/subagent-job.ts
-@@ -41,15 +41,7 @@ export const make: Effect.Effect<Runner, never, Session.Service | Job.Service |
-         title: recovery.description,
-         metadata: {},
-         recovery,
--        run: Effect.gen(function* () {
--          yield* sessions.resume(recovery.childSessionID)
--          const messages = yield* sessions.messages({ sessionID: recovery.childSessionID, order: "desc", limit: 20 })
--          const assistant = messages.find(
--            (message) =>
--              message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
--          )
--          return SubagentCompletion.text(assistant)
--        }),
-+        run: SubagentCompletion.finalText({ sessions, jobs, sessionID: recovery.childSessionID }),
-       }),
+@@ -50,15 +50,7 @@ const make: Effect.Effect<Interface, never, Session.Service | Job.Service | Scop
+           title: recovery.description,
+           metadata: {},
+           recovery,
+-          run: Effect.gen(function* () {
+-            yield* sessions.resume(recovery.childSessionID)
+-            const messages = yield* sessions.messages({ sessionID: recovery.childSessionID, order: "desc", limit: 20 })
+-            const assistant = messages.find(
+-              (message) =>
+-                message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
+-            )
+-            return SubagentCompletion.text(assistant)
+-          }),
++          run: SubagentCompletion.finalText({ sessions, jobs, sessionID: recovery.childSessionID }),
+         })
+         .pipe(Effect.setContext(context)),
      background: Effect.fn("SubagentJob.background")(function* (recovery: Recovery) {
-       const info = yield* jobs.background(recovery.childSessionID)
 diff --git a/packages/core/test/job.test.ts b/packages/core/test/job.test.ts
-index 400a2adb4a..f767f7feb3 100644
+index 400a2ad..f767f7f 100644
 --- a/packages/core/test/job.test.ts
 +++ b/packages/core/test/job.test.ts
 @@ -290,6 +290,35 @@ describe("Job", () => {
@@ -393,7 +419,7 @@ index 400a2adb4a..f767f7feb3 100644
      Effect.gen(function* () {
        const jobs = yield* Job.Service
 diff --git a/packages/core/test/session-execution.test.ts b/packages/core/test/session-execution.test.ts
-index d6cafcf7b5..ff66dbcfb8 100644
+index d6cafcf..27b38e5 100644
 --- a/packages/core/test/session-execution.test.ts
 +++ b/packages/core/test/session-execution.test.ts
 @@ -17,6 +17,7 @@ import { Session } from "@opencode/core/session"
@@ -404,7 +430,7 @@ index d6cafcf7b5..ff66dbcfb8 100644
  import { SessionInbox } from "@opencode/core/session/inbox"
  import { SessionMessage } from "@opencode/core/session/message"
  import { SessionRunner } from "@opencode/core/session/runner/index"
-@@ -373,6 +374,77 @@ describe("SessionExecution lifecycle", () => {
+@@ -373,6 +374,75 @@ describe("SessionExecution lifecycle", () => {
        expect((yield* claims(database))[sessionID]).toBe(true)
      }),
    )
@@ -441,10 +467,7 @@ index d6cafcf7b5..ff66dbcfb8 100644
 +        Effect.suspend(() => {
 +          const data = event.data as { sessionID?: string }
 +          if (data.sessionID !== sessionID) return Effect.void
-+          if (
-+            event.type !== SessionEvent.Execution.Succeeded.type &&
-+            event.type !== SessionStatusEvent.Status.type
-+          )
++          if (event.type !== SessionEvent.Execution.Succeeded.type && event.type !== SessionStatusEvent.Status.type)
 +            return Effect.void
 +          observed.push(event.type)
 +          if (event.type === SessionStatusEvent.Status.type)
@@ -464,9 +487,9 @@ index d6cafcf7b5..ff66dbcfb8 100644
 +      yield* execution.awaitIdle(sessionID)
 +
 +      expect(observed).toEqual([SessionStatusEvent.Status.type])
-+      // The claim is released while waiting so the Session is not swept as an
-+      // orphaned in-flight turn; its recovery is owned by the durable Job record.
-+      expect((yield* claims(database))[sessionID]).toBe(false)
++      // The claim is kept on purpose while waiting: the turn is still in flight and the
++      // boot sweep resumes it after recovering the durable background markers.
++      expect((yield* claims(database))[sessionID]).toBe(true)
 +
 +      // Once the background notification is acknowledged, the Session is no longer waiting.
 +      yield* jobs.completeBackground(marker.notificationID)
@@ -477,16 +500,28 @@ index d6cafcf7b5..ff66dbcfb8 100644
 +      yield* Deferred.await(succeeded)
 +      yield* execution.awaitIdle(sessionID)
 +      expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Succeeded.type])
++      expect((yield* claims(database))[sessionID]).toBe(false)
 +    }),
 +  )
  })
  
  describe("SessionRestart background recovery", () => {
+@@ -844,7 +914,9 @@ describe("SessionRestart background recovery", () => {
+ 
+       yield* restart.resumeSuspendedSessions
+       expect(drained.toSorted()).toEqual([child, parent].toSorted())
+-      expect(yield* claims(database)).toEqual({ [parent]: false, [child]: true, [unrelated]: false })
++      // The parent still awaits the running child's durable background marker, so its turn is
++      // parked in `waiting` and keeps the claim until the completion notification resumes it.
++      expect(yield* claims(database)).toEqual({ [parent]: true, [child]: true, [unrelated]: false })
+       expect(yield* attempts(database, child)).toBe(1)
+       expect(yield* restarted.get(child)).toMatchObject({ status: "running" })
+ 
 diff --git a/packages/core/test/tool-subagent.test.ts b/packages/core/test/tool-subagent.test.ts
-index 3d2c5f514e..400d66f630 100644
+index 04674ff..46f7df1 100644
 --- a/packages/core/test/tool-subagent.test.ts
 +++ b/packages/core/test/tool-subagent.test.ts
-@@ -813,4 +813,86 @@ describe("SubagentTool", () => {
+@@ -824,4 +824,86 @@ describe("SubagentTool", () => {
        ),
      ),
    )
@@ -574,7 +609,7 @@ index 3d2c5f514e..400d66f630 100644
 +  )
  })
 diff --git a/packages/plugin/src/tui/context.ts b/packages/plugin/src/tui/context.ts
-index fe641b39d5..09b681d705 100644
+index fe641b3..09b681d 100644
 --- a/packages/plugin/src/tui/context.ts
 +++ b/packages/plugin/src/tui/context.ts
 @@ -72,7 +72,7 @@ export interface Data {
@@ -587,7 +622,7 @@ index fe641b39d5..09b681d705 100644
        list(sessionID: string): SessionInboxInfo[]
        sync(sessionID: string): Promise<void>
 diff --git a/packages/schema/src/session-status-event.ts b/packages/schema/src/session-status-event.ts
-index da37144d2e..757ddbc41d 100644
+index da37144..757ddbc 100644
 --- a/packages/schema/src/session-status-event.ts
 +++ b/packages/schema/src/session-status-event.ts
 @@ -29,6 +29,9 @@ export const Info = Schema.Union([
@@ -601,19 +636,17 @@ index da37144d2e..757ddbc41d 100644
  export type Info = Schema.Schema.Type<typeof Info>
  
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
-index 73f61f329c..d4b74e5662 100644
+index d5e0477..73e326f 100644
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -1902,6 +1902,15 @@ export function Prompt(props: PromptProps) {
+@@ -1910,6 +1910,13 @@ export function Prompt(props: PromptProps) {
                        />
                      </box>
                    </Match>
 +                  <Match when={status() === "waiting"}>
 +                    <box flexDirection="row" gap={1} flexGrow={1} justifyContent="flex-start">
 +                      <box marginLeft={1}>
-+                        <text fg={theme.text.muted} wrapMode="none" truncate>
-+                          waiting for background work…
-+                        </text>
++                        <text fg={theme.text.muted}>waiting for background work…</text>
 +                      </box>
 +                    </box>
 +                  </Match>
@@ -621,10 +654,10 @@ index 73f61f329c..d4b74e5662 100644
                      {(progress) => (
                        <box paddingLeft={3} height={1} minHeight={0} flexShrink={1}>
 diff --git a/packages/tui/src/context/session-tabs.tsx b/packages/tui/src/context/session-tabs.tsx
-index 7b7f9f8c1c..a2ae49050e 100644
+index da3f2d6..fd2da2a 100644
 --- a/packages/tui/src/context/session-tabs.tsx
 +++ b/packages/tui/src/context/session-tabs.tsx
-@@ -169,7 +169,7 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
+@@ -170,7 +170,7 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
          // Parked synthetic context (user shells, plan reminders) stays pending without execution; only work counts as busy.
          busy: members.some(
            (id) =>
@@ -634,18 +667,56 @@ index 7b7f9f8c1c..a2ae49050e 100644
          ),
          renaming: data.session.title.pending(session),
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index d8f0b2d83c..8d4310b2bc 100644
+index 274cdc5..7617357 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -3093,7 +3093,10 @@ function Subagent(props: ToolProps) {
+@@ -3292,7 +3292,8 @@ function Subagent(props: ToolProps) {
    const model = createMemo(() => subagentModelLabel(stringValue(props.input.model), data.location.model.list()))
    const isRunning = createMemo(() => {
      const id = sessionID()
 -    return props.part.state.status === "running" || Boolean(id && data.session.status(id) === "running")
-+    if (props.part.state.status === "running") return true
-+    if (!id) return false
-+    const status = data.session.status(id)
-+    return status === "running" || status === "waiting"
++    const status = id ? data.session.status(id) : undefined
++    return props.part.state.status === "running" || status === "running" || status === "waiting"
    })
  
    return (
+diff --git a/packages/tui/test/context/session-tabs.test.tsx b/packages/tui/test/context/session-tabs.test.tsx
+index c2be516..6ebb534 100644
+--- a/packages/tui/test/context/session-tabs.test.tsx
++++ b/packages/tui/test/context/session-tabs.test.tsx
+@@ -748,6 +748,35 @@ test("closing a tab is not undone by another TUI viewing the same session", asyn
+   }
+ })
+ 
++test("treats a waiting session as busy until the execution settles", async () => {
++  const setup = await renderSessionTabs("first")
++
++  try {
++    await wait(() => setup.tabs.current() === "first" && setup.data.session.get("first") !== undefined)
++
++    setup.emit({
++      id: "evt_waiting_first",
++      created: 1,
++      type: "session.status",
++      data: { sessionID: "first", status: { type: "waiting" } },
++    })
++    await wait(() => setup.tabs.status("first").busy)
++    expect(setup.tabs.status("first").busy).toBe(true)
++
++    setup.emit({
++      id: "evt_done_first",
++      created: 2,
++      type: "session.execution.succeeded",
++      durable: { aggregateID: "first", seq: 1, version: 1 },
++      data: { sessionID: "first" },
++    })
++    await wait(() => !setup.tabs.status("first").busy)
++    expect(setup.tabs.status("first").busy).toBe(false)
++  } finally {
++    await setup.destroy()
++  }
++})
++
+ test("user prompt admissions pulse an already-busy background tab", async () => {
+   const setup = await renderSessionTabs("background", { persisted: ["background"] })
+ 

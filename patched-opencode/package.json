@@ -1,7 +1,7 @@
 {
   "name": "opencode-patched",
   "version": "1.0.0",
-  "description": "Reversible shim that launches a patched opencode build from source (session waiting status, sidebar gate removal, tick fix).",
+  "description": "Reversible shim that launches a patched opencode build (v2.1.4 base: waiting status/tick fix, sidebar gate removal, child inline steer composer, foreground-only interrupt with cancelBackground, non-reviving cancellation).",
   "author": "benrap",
   "license": "MIT",
   "type": "module",

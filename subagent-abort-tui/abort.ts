@@ -177,7 +177,7 @@ export async function collectSubtreeIDs(
  * Build the `session.interrupt` argument for aborting `sessionID`.
  *
  * `resume: false` prevents the interrupt from immediately resuming the
- * session. `cancelBackground: true` asks the host (core patch `0005`) to also
+ * session. `cancelBackground: true` asks the host (core patch `0004`) to also
  * cancel this session's outstanding durable background jobs; without it a
  * session parked in `waiting` would not actually stop. The flag is passed even
  * though the plugin's bundled type definitions may not list it yet.

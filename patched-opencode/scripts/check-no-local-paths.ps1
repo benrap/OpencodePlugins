@@ -9,8 +9,7 @@
 
     The patterns are deliberately narrow: the bare GitHub username (for example
     https://github.com/benrap/...), an "author" field, a LICENSE copyright, and
-    the branch name benrap/session-waiting-status are NOT flagged. Only real
-    filesystem paths are.
+    branch names are NOT flagged. Only real filesystem paths are.
 
 .PARAMETER RepoRoot
     Repository root to scan. Defaults to the current git toplevel.

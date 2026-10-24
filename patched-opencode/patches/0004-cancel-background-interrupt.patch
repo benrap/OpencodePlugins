@@ -1,8 +1,15 @@
+# 0004: make interrupt foreground-only by default and add the cancelBackground opt-in.
+# Merges the former waiting-session abort and foreground-only interrupt patches:
+# session.interrupt gains cancelBackground (default false); a default interrupt only stops
+# a live foreground turn and leaves durable background work running; an explicit
+# cancelBackground interrupt cancels a waiting Session's background jobs and settles it,
+# and Session.remove opts in so removal never orphans background work. Regenerated against
+# opencode v2.1.4 (68bc26b7da1990ce10ffecfbc1e09eb13aa5d824).
 diff --git a/packages/client/src/effect/api/api.ts b/packages/client/src/effect/api/api.ts
-index 47294c15a9..5f02a6086d 100644
+index fc779f1..0cfdf12 100644
 --- a/packages/client/src/effect/api/api.ts
 +++ b/packages/client/src/effect/api/api.ts
-@@ -1366,7 +1366,11 @@ export type SessionLogOutput =
+@@ -1239,7 +1239,11 @@ export type SessionLogOutput =
    | EventLog.Synced
  export type SessionLogOperation<E = never> = (input: SessionLogInput) => Stream.Stream<SessionLogOutput, E>
  
@@ -16,10 +23,10 @@ index 47294c15a9..5f02a6086d 100644
  export type SessionInterruptOperation<E = never> = (
    input: SessionInterruptInput,
 diff --git a/packages/client/src/effect/generated/client.ts b/packages/client/src/effect/generated/client.ts
-index efef07ec79..8e8ce2f097 100644
+index 1df8ff7..683378f 100644
 --- a/packages/client/src/effect/generated/client.ts
 +++ b/packages/client/src/effect/generated/client.ts
-@@ -683,9 +683,10 @@ const EndpointSessionLog = (raw: RawClient["server.session"]) => (input: Session
+@@ -713,9 +713,10 @@ const EndpointSessionLog = (raw: RawClient["server.session"]) => (input: Session
  
  const EndpointSessionInterrupt = (raw: RawClient["server.session"]) => (input: SessionInterruptInput) =>
    preserveEffect<SessionInterruptOutput>()(
@@ -34,10 +41,10 @@ index efef07ec79..8e8ce2f097 100644
  
  const EndpointSessionBackground = (raw: RawClient["server.session"]) => (input: SessionBackgroundInput) =>
 diff --git a/packages/client/src/promise/generated/client.ts b/packages/client/src/promise/generated/client.ts
-index 578f04995c..2c2733e802 100644
+index 312caa5..58ff413 100644
 --- a/packages/client/src/promise/generated/client.ts
 +++ b/packages/client/src/promise/generated/client.ts
-@@ -978,7 +978,7 @@ export function make(options: ClientOptions) {
+@@ -998,7 +998,7 @@ export function make(options: ClientOptions) {
            {
              method: "POST",
              path: `/api/session/${encodeURIComponent(input.sessionID)}/interrupt`,
@@ -47,10 +54,10 @@ index 578f04995c..2c2733e802 100644
              declaredStatuses: [400, 401, 404],
              empty: false,
 diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
-index f8b3cdd9a2..551e1aeb87 100644
+index 630daff..917e78a 100644
 --- a/packages/client/src/promise/generated/types.ts
 +++ b/packages/client/src/promise/generated/types.ts
-@@ -4622,7 +4622,11 @@ export type SessionLogOutput = SessionLogItem
+@@ -3969,7 +3969,11 @@ export type SessionLogOutput = SessionLogItem
  
  export type SessionInterruptInput = {
    readonly sessionID: { readonly sessionID: string }["sessionID"]
@@ -63,33 +70,11 @@ index f8b3cdd9a2..551e1aeb87 100644
  }
  
  export type SessionInterruptOutput = SessionInterruptResponse
-diff --git a/packages/core/src/location-activity.ts b/packages/core/src/location-activity.ts
-index 0425e9acab..c45b194a9a 100644
---- a/packages/core/src/location-activity.ts
-+++ b/packages/core/src/location-activity.ts
-@@ -60,9 +60,16 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly
-               )
-               // Invalidation only detaches the cache entry; borrowers retain the old
-               // graph. Stop its executions and settle tool cleanup before detaching it.
-+              // Reaping inactivity also tears down the Session's durable background work,
-+              // matching its pre-foreground-only interrupt behavior.
-               yield* Effect.forEach(
-                 owners,
--                (session) => execution.interrupt(session.id, { reason: "inactivity", awaitSettlement: true }),
-+                (session) =>
-+                  execution.interrupt(session.id, {
-+                    reason: "inactivity",
-+                    awaitSettlement: true,
-+                    cancelBackground: true,
-+                  }),
-                 {
-                   discard: true,
-                   concurrency: "unbounded",
 diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
-index 39f5f36d3a..83e38afbae 100644
+index cb21826..332661f 100644
 --- a/packages/core/src/session.ts
 +++ b/packages/core/src/session.ts
-@@ -216,7 +216,10 @@ export interface Interface {
+@@ -228,7 +228,10 @@ export interface Interface {
    readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
    readonly background: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
    readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
@@ -101,84 +86,92 @@ index 39f5f36d3a..83e38afbae 100644
    readonly synthetic: (
      input: Parameters<Session.Handle["synthetic"]>[0] & { sessionID: SessionSchema.ID },
    ) => ReturnType<Session.Handle["synthetic"]>
-@@ -366,7 +369,9 @@ const layer = Layer.effect(
+@@ -373,7 +376,9 @@ const layer = Layer.effect(
        view: (input) => sessions.forSession(input.sessionID).view(input),
        remove: Effect.fn("Session.remove")(function* (sessionID) {
          yield* result.get(sessionID)
 -        yield* execution.interrupt(sessionID)
-+        // Removing a Session tears down its durable background work with it: an
-+        // interrupt must not leave orphaned background jobs behind.
++        // Removing a Session tears down its durable background work with it: an interrupt
++        // must not leave orphaned background jobs behind.
 +        yield* execution.interrupt(sessionID, { cancelBackground: true })
          yield* execution.awaitIdle(sessionID)
          yield* transport.close(sessionID)
-         const children = yield* result.list({ parentID: sessionID })
+         const children = yield* store.list({ parentID: sessionID })
 diff --git a/packages/core/src/session/execution.ts b/packages/core/src/session/execution.ts
-index 379ee2423c..8c7cd461e7 100644
+index fdf9118..b6f37c4 100644
 --- a/packages/core/src/session/execution.ts
 +++ b/packages/core/src/session/execution.ts
-@@ -25,17 +25,21 @@ export interface Interface {
+@@ -25,15 +25,19 @@ export interface Interface {
    /** Registers newly recorded work. Repeated wakeups may coalesce. */
    readonly wake: (sessionID: SessionSchema.ID) => Effect.Effect<void>
    /**
--   * Interrupt active work owned by this process. A no-op only when idle with no outstanding
--   * background work; a `waiting` Session's background work is cancelled and its terminal
--   * published. Resolves once the interruption is accepted; cleanup settles asynchronously in
--   * the execution fiber. Returns whether anything was interrupted. Compose with `awaitIdle`
--   * when settlement matters. `awaitSettlement` waits only for the interrupted execution,
--   * rather than fresh work admitted during its cleanup.
+-   * Interrupt active work owned by this process. Idle interruption is a no-op. Resolves once
+-   * the interruption is accepted; cleanup settles asynchronously in the execution fiber.
+-   * Returns whether an active execution was interrupted. Compose with `awaitIdle` when
+-   * settlement matters.
 +   * Interrupt active work owned by this process. A live foreground turn is interrupted whenever
-+   * this process owns one. The interrupt is foreground-only by default: a `waiting` Session (no
-+   * active execution) is a no-op and the Session's outstanding durable background work is left
-+   * running. Pass `cancelBackground: true` to also cancel the Session's outstanding background
-+   * jobs (`jobs.cancel`, pending job cancellation, `jobs.completeBackground`) and to settle a
-+   * `waiting` Session with the interrupted terminal. Resolves once the interruption is accepted;
-+   * cleanup settles asynchronously in the execution fiber. Returns whether anything was
-+   * interrupted. Compose with `awaitIdle` when settlement matters. `awaitSettlement` waits only
-+   * for the interrupted execution, rather than fresh work admitted during its cleanup.
++   * this process owns one. The interrupt is foreground-only by default: interrupting a
++   * `waiting` or idle Session is a no-op, and the Session's outstanding durable background work
++   * is left running. Pass `cancelBackground: true` to also cancel the Session's background jobs
++   * and to settle a `waiting` Session with the interrupted terminal. Resolves once the
++   * interruption is accepted; cleanup settles asynchronously in the execution fiber. Returns
++   * whether anything was interrupted. Compose with `awaitIdle` when settlement matters.
     */
    readonly interrupt: (
      sessionID: SessionSchema.ID,
      options?: {
        readonly resume?: boolean
 +      readonly cancelBackground?: boolean
-       readonly reason?: "user" | "inactivity"
-       readonly awaitSettlement?: boolean
      },
-@@ -110,6 +114,11 @@ export const layer = Layer.effect(
+   ) => Effect.Effect<boolean>
+   /** Resolves once this process owns no active execution for the Session. Returns immediately when idle and never starts work. */
+@@ -106,6 +110,15 @@ export const layer = Layer.effect(
          Reloaded: (result) => drain(sessionID, result.force, result.continuation, promotable),
        })
      })
 +    // Interrupts are foreground-only by default. Only an explicit `cancelBackground` interrupt
 +    // cancels a Session's durable background work, so the opt-in is recorded here when
-+    // `Service.interrupt` runs and is consumed by whichever settlement path handles it: the
-+    // coordinator's settled hook for a live turn, or the waiting branch for a parked Session.
++    // `Service.interrupt` runs and consumed by whichever settlement path handles it: the
++    // coordinator's settled hook for a live turn, or the parked-Session branch of `interrupt`.
 +    const cancelBackgroundOnInterrupt = new Set<SessionSchema.ID>()
++    // Late-bound so the settled hook can stop a subagent child without depending on the
++    // coordinator binding that is still being constructed below.
++    const interruptChild = (sessionID: SessionSchema.ID): Effect.Effect<boolean> =>
++      coordinator.interrupt(sessionID, "user")
      const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError, InterruptReason>({
        started: (sessionID) =>
          reportLifecycle(
-@@ -122,6 +131,10 @@ export const layer = Layer.effect(
+@@ -118,6 +131,10 @@ export const layer = Layer.effect(
          reportLifecycle(
            sessionID,
            Effect.gen(function* () {
-+            // Consume the opt-in recorded by `Service.interrupt`. A live-turn interrupt may opt
-+            // into cancelling durable background work; the default foreground-only interrupt
-+            // leaves it running so the background job can resume the Session.
++            // Consume the opt-in recorded by `Service.interrupt`. A live-turn interrupt may
++            // opt into cancelling durable background work; the default foreground-only
++            // interrupt leaves it running so the background job can resume the Session.
 +            const cancelBackground = cancelBackgroundOnInterrupt.delete(sessionID)
              const outcome = terminal(exit, reason)
              if (outcome.type === "succeeded") {
                if (yield* jobs.awaiting(sessionID)) {
-@@ -139,7 +152,9 @@ export const layer = Layer.effect(
-             }
+@@ -135,6 +152,18 @@ export const layer = Layer.effect(
              if (outcome.type === "interrupted") {
                // Deliberate stops release the claim; shutdown keeps it for restart continuity.
--              if (outcome.reason !== "shutdown") {
-+              // Cancelling durable background work is opt-in: the default foreground-only
-+              // interrupt leaves it running.
-+              if (outcome.reason !== "shutdown" && cancelBackground) {
-                 yield* jobs.cancel(sessionID)
-                 const pending = yield* jobs.pendingFor(sessionID)
-                 yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
-@@ -168,27 +183,36 @@ export const layer = Layer.effect(
+               if (outcome.reason !== "shutdown") yield* jobs.cancel(sessionID)
++              // Cancelling durable background work is opt-in: a default foreground-only
++              // interrupt leaves it running so the background job can resume the Session.
++              if (cancelBackground) {
++                const pending = yield* jobs.pendingFor(sessionID)
++                yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
++                yield* Effect.forEach(
++                  pending,
++                  (job) =>
++                    job.recovery.kind === "subagent" ? interruptChild(job.recovery.childSessionID) : Effect.void,
++                  { discard: true },
++                )
++              }
+               yield* bus.publish(
+                 SessionEvent.Execution.Interrupted,
+                 { sessionID, reason: outcome.reason },
+@@ -159,8 +188,45 @@ export const layer = Layer.effect(
        isActive: coordinator.isActive,
        interrupt: (sessionID, options) =>
          Effect.gen(function* () {
@@ -186,56 +179,63 @@ index 379ee2423c..8c7cd461e7 100644
 +          // Record the opt-in before interrupting so the settled hook of the live turn we are
 +          // about to stop observes it; the hook consumes the flag when it runs.
 +          if (cancelBackground) cancelBackgroundOnInterrupt.add(sessionID)
-           const interrupted = yield* coordinator.interrupt(sessionID, options?.reason ?? "user", options)
-           // A Session can settle its turn while still owning durable background work, which parks
--          // it in `waiting` with no active execution for the coordinator to interrupt. Cancel that
--          // work, clear its recovery marker, and publish the interrupted terminal so clients leave
--          // `waiting` and the Session does not immediately re-enter it.
-+          // it in `waiting` with no active execution for the coordinator to interrupt. When
-+          // cancellation is requested, cancel that work, clear its recovery marker, and publish
-+          // the interrupted terminal so clients leave `waiting` and the Session does not
-+          // immediately re-enter it. A foreground-only interrupt leaves the Session waiting.
-           let settled = interrupted
-           if (!settled) {
--            const pending = yield* jobs.pendingFor(sessionID)
--            if (pending.length > 0) {
--              yield* jobs.cancel(sessionID)
--              yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
--              yield* Effect.forEach(pending, (job) => jobs.completeBackground(job.notificationID), {
--                discard: true,
--              })
--              yield* bus.publish(
--                SessionEvent.Execution.Interrupted,
--                { sessionID, reason: options?.reason ?? "user" },
--                releaseOnCommit(sessionID),
--              )
--              settled = true
-+            if (cancelBackground) {
+           const interrupted = yield* coordinator.interrupt(sessionID, "user")
+-          if (!options?.resume) return interrupted
++          let handled = interrupted
++          if (!interrupted) {
++            // `coordinator.interrupt` returns false while an execution is still settling. Only
++            // a Session with no active execution is parked in `waiting`; a settlement in
++            // progress will consume a recorded opt-in from its own settled hook.
++            const active = yield* coordinator.isActive(sessionID)
++            if (cancelBackground && !active) {
 +              const pending = yield* jobs.pendingFor(sessionID)
 +              if (pending.length > 0) {
-+                yield* jobs.cancel(sessionID)
++                // A waiting Session has no execution whose settled hook could clear its
++                // markers: cancel the durable work here, then acknowledge each marker so the
++                // Session no longer awaits it and publish the terminal clients are missing.
 +                yield* Effect.forEach(pending, (job) => jobs.cancel(job.id), { discard: true })
++                yield* Effect.forEach(
++                  pending,
++                  (job) =>
++                    job.recovery.kind === "subagent" ? interruptChild(job.recovery.childSessionID) : Effect.void,
++                  { discard: true },
++                )
 +                yield* Effect.forEach(pending, (job) => jobs.completeBackground(job.notificationID), {
 +                  discard: true,
 +                })
 +                yield* bus.publish(
 +                  SessionEvent.Execution.Interrupted,
-+                  { sessionID, reason: options?.reason ?? "user" },
++                  { sessionID, reason: "user" },
 +                  releaseOnCommit(sessionID),
 +                )
-+                settled = true
++                handled = true
 +              }
-             }
-+            // No active execution was interrupted, so no settled hook will consume the opt-in.
-+            cancelBackgroundOnInterrupt.delete(sessionID)
-           }
-           if (!options?.resume) return settled
++            }
++            // No execution was interrupted, so no settled hook will consume the opt-in.
++            if (!active) cancelBackgroundOnInterrupt.delete(sessionID)
++          }
++          if (!options?.resume) return handled
            // Resume steering input and between-turn control work from the interrupted
+           // intent. Queued next-turn prompts stay parked: a steer-scoped drain never
+           // promotes them, and a control item behind a queued prompt waits its turn.
+@@ -170,10 +236,10 @@ export const layer = Layer.effect(
+           // rows inside uninterruptible publications, so a steer row is either still
+           // promotable here or was fully delivered and needs no resumption.
+           const next = yield* SessionInbox.nextPromotable(db, sessionID, "input")
+-          if (next === undefined) return interrupted
++          if (next === undefined) return handled
+           if (next.delivery === "steer" || next.type === "compaction" || next.type === "move")
+             yield* coordinator.wake(sessionID, "steer")
+-          return interrupted
++          return handled
+         }),
+       resume: coordinator.run,
+       wake: coordinator.wake,
 diff --git a/packages/core/src/session/session.ts b/packages/core/src/session/session.ts
-index 3cd130086d..2656349c08 100644
+index 06c2b24..98ff8f1 100644
 --- a/packages/core/src/session/session.ts
 +++ b/packages/core/src/session/session.ts
-@@ -313,7 +313,7 @@ export const make = Effect.fn("Session.make")(function* () {
+@@ -323,7 +323,7 @@ export const make = Effect.fn("Session.make")(function* () {
        ),
    )
    const interrupt = Effect.fn("Session.interrupt")(
@@ -244,124 +244,81 @@ index 3cd130086d..2656349c08 100644
        Effect.uninterruptible(execution.interrupt(sessionID, options)),
    )
    const stage = Effect.fn("Session.revert.stage")(function* (
-diff --git a/packages/core/test/location-activity.test.ts b/packages/core/test/location-activity.test.ts
-index a71b0a82f4..2fbbff27d8 100644
---- a/packages/core/test/location-activity.test.ts
-+++ b/packages/core/test/location-activity.test.ts
-@@ -8,6 +8,7 @@ import { makeGlobalNode } from "@opencode/util/effect/app-node"
- import { Bus } from "@opencode/core/bus"
- import { Database } from "@opencode/core/database/database"
- import { Form } from "@opencode/core/form"
-+import { Job } from "@opencode/core/job"
- import { Location } from "@opencode/core/location"
- import { LocationActivity } from "@opencode/core/location-activity"
- import { LocationServiceMap, type LocationServices } from "@opencode/core/location-services"
-@@ -84,6 +85,7 @@ const it = testEffect(
-     LayerNode.group([
-       Database.node,
-       Bus.node,
-+      Job.node,
-       SessionStore.node,
-       LocationServiceMap.node,
-       SessionExecution.node,
-@@ -219,4 +221,67 @@ describe("LocationActivity eviction", () => {
-         }),
-     )
-   }
-+
-+  it.effect("cancels a Session's background work when inactivity eviction interrupts it", () =>
-+    Effect.gen(function* () {
-+      const db = (yield* Database.Service).db
-+      const bus = yield* Bus.Service
-+      const map = yield* LocationServiceMap.Service
-+      const execution = yield* SessionExecution.Service
-+      const jobs = yield* Job.Service
-+      const sessionID = Session.ID.make("ses_inactivity_background")
-+      const ref = LocationServiceMap.canonical({ directory: AbsolutePath.make("/project") })
-+      const idle = Location.Ref.make({ directory: ref.directory, workspaceID: Workspace.ID.make("wrk_idle") })
-+      yield* db
-+        .insert(ProjectTable)
-+        .values({ id: Project.ID.global, worktree: ref.directory, sandboxes: [] })
-+        .run()
-+        .pipe(Effect.orDie)
-+      yield* db
-+        .insert(SessionTable)
-+        .values({
-+          id: sessionID,
-+          project_id: Project.ID.global,
-+          slug: "question",
-+          directory: ref.directory,
-+          title: "Waiting question",
-+          version: "test",
-+        })
-+        .run()
-+        .pipe(Effect.orDie)
-+
-+      // Durable background work owned by the Session, independent of its live drain. The
-+      // inactivity reaper must cancel it: pre-0005, interrupt with reason "inactivity"
-+      // cancelled the Session's jobs, so a foreground-only interrupt would regress this.
-+      const shell = yield* jobs.start({
-+        id: "sh_inactivity_background",
-+        type: "shell",
-+        recovery: { kind: "shell", sessionID, shellID: "sh_inactivity_background", command: "sleep" },
-+        run: Effect.never,
-+      })
-+      yield* jobs.background(shell.id)
-+      expect(yield* jobs.awaiting(sessionID)).toBe(true)
-+
-+      const created = yield* Deferred.make<void>()
-+      const unsubscribe = yield* bus.listen((event) =>
-+        Effect.suspend(() => {
-+          if (event.type !== Form.Event.Created.type) return Effect.void
-+          return Deferred.succeed(created, undefined).pipe(Effect.asVoid)
-+        }),
-+      )
-+      yield* Effect.addFinalizer(() => unsubscribe)
-+      yield* execution.resume(sessionID).pipe(Effect.forkScoped)
-+      yield* Deferred.await(created)
-+      yield* Location.Service.pipe(Effect.provide(map.get(idle)), Effect.scoped)
-+
-+      // Seed the eviction deadline, then cross it so the reaper interrupts the Session.
-+      yield* TestClock.adjust("1 minute")
-+      yield* TestClock.adjust("62 minutes")
-+      // Slow cleanup (the drain's 5 minute onInterrupt sleep) settles after the sweep.
-+      yield* TestClock.adjust("5 minutes")
-+      yield* execution.awaitIdle(sessionID)
-+
-+      expect((yield* jobs.get("sh_inactivity_background")).status).toBe("cancelled")
-+    }),
-+  )
- })
 diff --git a/packages/core/test/session-execution.test.ts b/packages/core/test/session-execution.test.ts
-index b543f3e23b..12e11565de 100644
+index 27b38e5..46e1674 100644
 --- a/packages/core/test/session-execution.test.ts
 +++ b/packages/core/test/session-execution.test.ts
-@@ -190,7 +190,7 @@ describe("SessionExecution lifecycle", () => {
-       })
-       yield* jobs.background(child)
-       yield* Deferred.await(running)
--      expect(yield* execution.interrupt(child)).toBeTrue()
-+      expect(yield* execution.interrupt(child, { cancelBackground: true })).toBeTrue()
-       yield* execution.awaitIdle(child)
-       expect((yield* jobs.wait({ id: child })).info?.status).toBe("cancelled")
-       expect(yield* jobs.pendingBackground).toMatchObject([{ id: child, status: "cancelled" }])
-@@ -501,9 +501,9 @@ describe("SessionExecution lifecycle", () => {
-       expect(yield* execution.isActive(sessionID)).toBe(false)
-       expect(yield* jobs.awaiting(sessionID)).toBe(true)
- 
--      // Interrupting a waiting Session is not a no-op: it cancels the background work,
--      // clears the durable marker, and publishes the interrupted terminal.
--      expect(yield* execution.interrupt(sessionID)).toBeTrue()
+@@ -443,6 +443,176 @@ describe("SessionExecution lifecycle", () => {
+       expect((yield* claims(database))[sessionID]).toBe(false)
+     }),
+   )
++
++  it.effect("cancels outstanding background work and settles when interrupting a waiting Session", () =>
++    Effect.gen(function* () {
++      const database = yield* Database.Service
++      const bus = yield* Bus.Service
++      const jobs = yield* Job.Service
++      const sessionID = Session.ID.make("ses_interrupt_waiting_background")
++      yield* seedSessions(database, [sessionID])
++
++      const gate = yield* Deferred.make<void>()
++      const cancelled = yield* Deferred.make<void>()
++      const shell = yield* jobs.start({
++        id: "sh_interrupt_waiting",
++        type: "shell",
++        title: "sleep",
++        recovery: { kind: "shell", sessionID, shellID: "sh_interrupt_waiting", command: "sleep" },
++        run: Deferred.await(gate).pipe(
++          Effect.as(""),
++          Effect.onInterrupt(() => Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid)),
++        ),
++      })
++      const marker = yield* jobs.background(shell.id)
++      if (!marker?.notificationID) return yield* Effect.die("expected background marker")
++
++      const observed: string[] = []
++      const waiting = yield* Deferred.make<void>()
++      const interrupted = yield* Deferred.make<void>()
++      yield* bus.listen((event) =>
++        Effect.suspend(() => {
++          const data = event.data as { sessionID?: string }
++          if (data.sessionID !== sessionID) return Effect.void
++          if (
++            event.type !== SessionEvent.Execution.Interrupted.type &&
++            event.type !== SessionStatusEvent.Status.type
++          )
++            return Effect.void
++          observed.push(event.type)
++          if (event.type === SessionStatusEvent.Status.type)
++            return Deferred.succeed(waiting, undefined).pipe(Effect.asVoid)
++          return Deferred.succeed(interrupted, undefined).pipe(Effect.asVoid)
++        }),
++      )
++
++      const scope = yield* Scope.make()
++      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
++      const context = yield* buildExecution(scope, () => Effect.void)
++      const execution = Context.get(context, SessionExecution.Service)
++      yield* execution.resume(sessionID).pipe(Effect.forkScoped)
++      yield* Deferred.await(waiting)
++      yield* execution.awaitIdle(sessionID)
++
++      // The turn settled with outstanding durable work: waiting, but no active execution.
++      expect(observed).toEqual([SessionStatusEvent.Status.type])
++      expect(yield* execution.isActive(sessionID)).toBe(false)
++      expect(yield* jobs.awaiting(sessionID)).toBe(true)
++
 +      // Interrupting a waiting Session with cancelBackground is not a no-op: it cancels the
 +      // background work, clears the durable marker, and publishes the interrupted terminal.
 +      expect(yield* execution.interrupt(sessionID, { cancelBackground: true })).toBeTrue()
-       yield* Deferred.await(cancelled)
-       yield* Deferred.await(interrupted)
-       yield* execution.awaitIdle(sessionID)
-@@ -512,6 +512,109 @@ describe("SessionExecution lifecycle", () => {
-       expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Interrupted.type])
-     }),
-   )
++      yield* Deferred.await(cancelled)
++      yield* Deferred.await(interrupted)
++      yield* execution.awaitIdle(sessionID)
++
++      expect(yield* jobs.awaiting(sessionID)).toBe(false)
++      expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Interrupted.type])
++    }),
++  )
 +
 +  it.effect("interrupts a running turn but leaves background work by default", () =>
 +    Effect.gen(function* () {
@@ -469,7 +426,7 @@ index b543f3e23b..12e11565de 100644
  
  describe("SessionRestart background recovery", () => {
 diff --git a/packages/core/test/session-remove.test.ts b/packages/core/test/session-remove.test.ts
-index 2e39ee6233..7ccff53016 100644
+index 2e39ee6..c609d7a 100644
 --- a/packages/core/test/session-remove.test.ts
 +++ b/packages/core/test/session-remove.test.ts
 @@ -22,6 +22,25 @@ import { tmpdirScoped } from "./fixture/tmpdir"
@@ -523,17 +480,53 @@ index 2e39ee6233..7ccff53016 100644
 +
 +      yield* session.remove(created.id)
 +
-+      // Removal must keep the pre-0005 cleanup: a removed Session's durable background
-+      // work is cancelled rather than left orphaned.
++      // Removal must keep the pre-foreground-only cleanup: a removed Session's durable
++      // background work is cancelled rather than left orphaned.
 +      expect(interrupts).toEqual([{ sessionID: created.id, options: { cancelBackground: true } }])
 +    }),
 +  )
  })
+diff --git a/packages/protocol/openapi.json b/packages/protocol/openapi.json
+index 73a54d3..7bb3932 100644
+--- a/packages/protocol/openapi.json
++++ b/packages/protocol/openapi.json
+@@ -4125,6 +4125,22 @@
+               ]
+             },
+             "required": false
++          },
++          {
++            "name": "cancelBackground",
++            "in": "query",
++            "schema": {
++              "anyOf": [
++                {
++                  "type": "string",
++                  "enum": ["true", "false"]
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "required": false
+           }
+         ],
+         "security": [],
+@@ -4177,7 +4193,7 @@
+             }
+           }
+         },
+-        "description": "Interrupt active execution owned by this OpenCode process. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
++        "description": "Interrupt active execution owned by this OpenCode process. Interrupting is foreground-only by default. Interrupting a waiting Session is a no-op unless cancelBackground=true, which cancels outstanding durable background jobs and settles the waiting Session. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
+         "summary": "Interrupt session execution"
+       }
+     },
 diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
-index d5bf2af1db..8b8654db90 100644
+index 95683c8..4d3e71d 100644
 --- a/packages/protocol/src/groups/session.ts
 +++ b/packages/protocol/src/groups/session.ts
-@@ -743,7 +743,10 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
+@@ -684,7 +684,10 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
      .add(
        HttpApiEndpoint.post("session.interrupt", "/api/session/:sessionID/interrupt", {
          params: { sessionID: Session.ID },
@@ -545,20 +538,20 @@ index d5bf2af1db..8b8654db90 100644
          success: Schema.Struct({
            interrupted: Schema.Boolean.annotate({
              description: "Whether an active execution owned by this OpenCode process was interrupted.",
-@@ -757,7 +760,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
+@@ -698,7 +701,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
              identifier: "session.interrupt",
              summary: "Interrupt session execution",
              description:
 -              "Interrupt active execution owned by this OpenCode process. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
-+              "Interrupt active execution owned by this OpenCode process. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. By default the interrupt is foreground-only: it stops a live foreground turn but leaves the Session's durable background jobs running, and interrupting a waiting Session (no active execution) is a no-op. Pass cancelBackground=true to also cancel the Session's outstanding background jobs and to settle a waiting Session. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
++              "Interrupt active execution owned by this OpenCode process. Interrupting is foreground-only by default. Interrupting a waiting Session is a no-op unless cancelBackground=true, which cancels outstanding durable background jobs and settles the waiting Session. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
            }),
          ),
      )
 diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
-index 73a0763352..4f0e40fab6 100644
+index 0386bd4..8531b5a 100644
 --- a/packages/server/src/handlers/session.ts
 +++ b/packages/server/src/handlers/session.ts
-@@ -619,7 +619,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
+@@ -590,7 +590,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
        .handle(
          "session.interrupt",
          Effect.fn(function* (ctx) {
