@@ -7,7 +7,7 @@ child/subagent session you are currently viewing.
 
 > **Version note:** the stock-host analysis below was performed against OpenCode
 > v2.0.27 and was not re-audited for v2.1.4. On the patched v2.1.4 build
-> (`patched-opencode`), the host's inline child steer composer already provides
+> (`opencode-patch`), the host's inline child steer composer already provides
 > this capability, so this plugin is only needed on stock hosts.
 
 On **stock** OpenCode v2.0.27 the host **hides its own message prompt for child
@@ -24,7 +24,7 @@ The backend already supports steering (prompt delivery defaults to `"steer"`),
 so the only thing missing is a TUI affordance to type a steer for the child you
 are viewing. This plugin adds one.
 
-> On the **patched** build (`patched-opencode`, patch `0003`) the host already
+> On the **patched** build (`opencode-patch`, patch `0003`) the host already
 > renders its normal `<Prompt>` for children as an inline steer composer, so the
 > gap is closed there and this plugin is mainly for **stock** opencode. It works
 > on both — see [Known limitations](#known-limitations).
@@ -89,7 +89,7 @@ to the `plugins` array in `~/.config/opencode/opencode.jsonc` (path-based, like
 ```jsonc
 {
   "plugins": [
-    { "package": "<repo-root>\\subagent-steer" }
+    { "package": "<repo-root>\\plugins\\subagent-steer" }
   ]
 }
 ```
@@ -107,7 +107,7 @@ The default shortcut is configurable like any named command:
 ## Known limitations
 
 - **On the patched build the host already provides the child composer.** Patch
-  `0003` in `patched-opencode` renders the host `<Prompt>` for child sessions as
+  `0003` in `opencode-patch` renders the host `<Prompt>` for child sessions as
   an inline steer composer (`packages/tui/src/routes/session/index.tsx`,
   `packages/tui/src/component/prompt/index.tsx`), so this plugin's out-of-band
   keybind + dialog affordance is mainly for **stock** opencode, where the host

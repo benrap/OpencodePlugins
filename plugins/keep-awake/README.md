@@ -80,7 +80,7 @@ user-initiated sleep still terminates power requests.
 ## Install
 
 ```bash
-opencode plugin add ./keep-awake
+opencode plugin add ./plugins/keep-awake
 ```
 
 Or reference the path in `opencode.jsonc`:
@@ -88,7 +88,7 @@ Or reference the path in `opencode.jsonc`:
 ```jsonc
 {
   "plugins": [
-    { "package": "./keep-awake", "options": { "releaseDelayMs": 1500, "maxSeconds": 43200, "keepDisplayOn": false } }
+    { "package": "./plugins/keep-awake", "options": { "releaseDelayMs": 1500, "maxSeconds": 43200, "keepDisplayOn": false } }
   ]
 }
 ```
@@ -119,5 +119,5 @@ cold start (or a full teardown/re-setup).
 ## Test
 
 ```bash
-node keep-awake/test/keep-awake.test.mjs
+node plugins/keep-awake/test/keep-awake.test.mjs
 ```

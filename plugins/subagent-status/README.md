@@ -67,11 +67,11 @@ stream and is scoped process-wide; only subagents with a parent whose state is
 ## Install
 
 ```bash
-opencode plugin add ./subagent-status
+opencode plugin add ./plugins/subagent-status
 ```
 
 Or reference the path in `opencode.jsonc`:
 
 ```jsonc
-{ "plugins": [{ "package": "./subagent-status" }] }
+{ "plugins": [{ "package": "./plugins/subagent-status" }] }
 ```

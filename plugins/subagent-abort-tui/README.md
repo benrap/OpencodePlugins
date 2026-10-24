@@ -49,7 +49,7 @@ to the `plugins` array in `~/.config/opencode/opencode.jsonc` (path-based, like
 ```jsonc
 {
   "plugins": [
-    { "package": "<repo-root>\\subagent-abort-tui" }
+    { "package": "<repo-root>\\plugins\\subagent-abort-tui" }
   ]
 }
 ```

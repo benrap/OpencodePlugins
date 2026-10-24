@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/benrap/OpencodePlugins.git",
-    "directory": "keep-awake"
+    "directory": "plugins/keep-awake"
   },
   "type": "module",
   "main": "index.js"

@@ -94,7 +94,7 @@ no nudge).
 ## Install
 
 ```bash
-opencode plugin add ./prefill
+opencode plugin add ./plugins/prefill
 ```
 
 Or reference the path in `opencode.jsonc`:
@@ -103,7 +103,7 @@ Or reference the path in `opencode.jsonc`:
 {
   "plugins": [
     {
-      "package": "./prefill",
+      "package": "./plugins/prefill",
       "options": {
         "trailingNudge": "Continue"
       }
