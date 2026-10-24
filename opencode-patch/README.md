@@ -1,13 +1,13 @@
 # opencode-patched
 
-A runnable **Windows x64** build of OpenCode based on upstream v2.1.4 (tag `v2.1.4`, commit `68bc26b7da1990ce10ffecfbc1e09eb13aa5d824`), plus a five-patch set that adds a session **waiting** status, removes the subagent sidebar gate, adds an inline steer composer for child sessions, makes the default interrupt **foreground-only**, and makes abort terminate cleanly (a cancelled job no longer revives its owner, and a parked `waiting` owner settles instead of staying stuck).
+Runnable **Windows x64**, **Linux x64**, and **Linux arm64** builds of OpenCode based on upstream v2.1.4 (tag `v2.1.4`, commit `68bc26b7da1990ce10ffecfbc1e09eb13aa5d824`), plus a five-patch set that adds a session **waiting** status, removes the subagent sidebar gate, adds an inline steer composer for child sessions, makes the default interrupt **foreground-only**, and makes abort terminate cleanly (a cancelled job no longer revives its owner, and a parked `waiting` owner settles instead of staying stuck).
 
 ---
 
 ## How to run it (TL;DR)
 
-1. **Prebuilt zip (simplest)** — download the `patched-v2.1.4` asset below, unzip it anywhere, and run `opencode.exe` from that folder.
-2. **PATH shim** — if you already use the `%USERPROFILE%\.opencode-patched\opencode.cmd` shim, **quit every running `opencode` process and relaunch**; `opencode` then resolves to the patched build. If the shim directory is missing from your `PATH`, re-run `scripts\switch-patched.ps1` (see [Install into PATH](#install-into-path-optional)).
+1. **Prebuilt binary (simplest)** — download the `patched-v2.1.4` asset for your platform below: the Windows zip (`opencode.exe`) or a Linux tarball (`tar -xzf` → `chmod +x ./opencode`), then run it from that folder.
+2. **PATH shim (Windows)** — if you already use the `%USERPROFILE%\.opencode-patched\opencode.cmd` shim, **quit every running `opencode` process and relaunch**; `opencode` then resolves to the patched build. If the shim directory is missing from your `PATH`, re-run `scripts\switch-patched.ps1` (see [Install into PATH](#install-into-path-optional-windows)).
 3. **Build from source** — see [Build from source](#build-from-source-optional).
 
 **Confirm which build you are on:** `opencode --version` → `opencode v2.1.4-patched`.
@@ -16,7 +16,12 @@ A runnable **Windows x64** build of OpenCode based on upstream v2.1.4 (tag `v2.1
 
 ---
 
-## Download & run (Windows x64, no dependencies)
+## Download & run (Windows x64, Linux x64, Linux arm64)
+
+No `bun`, no `node`, and no source tree are required — every asset contains a
+self-contained binary.
+
+### Windows x64
 
 **Direct download:**
 
@@ -27,11 +32,49 @@ A runnable **Windows x64** build of OpenCode based on upstream v2.1.4 (tag `v2.1
 1. Download `opencode-patched-windows-x64.zip` from the link above.
 2. Unzip it to a folder of your choice. The zip contains a single self-contained `opencode.exe` at its root.
 3. Run `opencode.exe` from that folder.
-   - Optionally, add the folder to your `PATH` so you can run `opencode` from anywhere (see [Install into PATH](#install-into-path-optional)).
+   - Optionally, add the folder to your `PATH` so you can run `opencode` from anywhere (see [Install into PATH](#install-into-path-optional-windows)).
 
-No `bun`, no `node`, and no source tree are required — the zip contains a self-contained binary.
+### Linux x64 / arm64
 
-> **Note:** the prebuilt zip above is the **`patched-v2.1.4`** release, built from
+**Direct downloads:**
+
+- x64: <https://github.com/benrap/OpencodePlugins/releases/download/patched-v2.1.4/opencode-patched-linux-x64.tar.gz>
+- arm64: <https://github.com/benrap/OpencodePlugins/releases/download/patched-v2.1.4/opencode-patched-linux-arm64.tar.gz>
+
+**Requirements:** a glibc-based `x86_64` (ELF `e_machine` `0x3E`) or `aarch64`
+(ELF `e_machine` `0xB7`) Linux host. The **x64** build is runtime-tested on
+Ubuntu 24.04 LTS (glibc 2.39); the **arm64** build is cross-compiled and
+statically verified only (ELF `e_machine` `0xB7` plus the embedded patch and
+version markers) because the build host has no arm64 runtime. The binaries are
+dynamically linked against glibc — **no musl or baseline builds are published** —
+and need nothing beyond glibc at runtime.
+
+**Steps:**
+
+1. Download the tarball matching your architecture from the links above.
+2. Extract it: `tar -xzf opencode-patched-linux-x64.tar.gz` (arm64: `tar -xzf opencode-patched-linux-arm64.tar.gz`). Each archive holds a single root entry, `opencode`.
+3. `chmod +x opencode` — GNU tar already restores mode 755, so this is only needed if your extractor dropped the executable bit.
+4. Confirm the build: `./opencode --version` → `opencode v2.1.4-patched`.
+
+**Linux assets:**
+
+| Artifact | Size | SHA-256 |
+|---|---:|---|
+| `opencode-patched-linux-x64.tar.gz` | 114,400,216 B | `00711962E783FCDEA7803A76B7422EF2CB7A14AD87339405501F7A42D2513974` |
+| `opencode-patched-linux-arm64.tar.gz` | 113,093,527 B | `A0D78313696FCE0A13078E4E0E1F8CB4E5C775A70E11B09D07E4F1FA569C4367` |
+
+Verify the download against the table (digests are shown uppercase; `sha256sum`
+prints lowercase, and hex case is ignored):
+
+```bash
+sha256sum opencode-patched-linux-*.tar.gz
+```
+
+The extracted `opencode` binary is 240,408,752 B on x64 and 236,112,888 B on
+arm64.
+
+> **Note:** the prebuilt assets above — the Windows zip, and the Linux x64 and
+> Linux arm64 tarballs — are all the **`patched-v2.1.4`** release, built from
 > the upstream v2.1.4 base. The previous **`patched-v2.0.27`** release remains
 > available for rollback, and **`patched-v2.0.23`** is older history. To reproduce
 > the current build from source, apply
@@ -40,8 +83,9 @@ No `bun`, no `node`, and no source tree are required — the zip contains a self
 
 **Notes:**
 
-- On first use of `grep`/`glob`, OpenCode may download `ripgrep` automatically. This is standard OpenCode behavior; everything else in the zip is self-contained.
-- The binary is **unsigned**, so Windows SmartScreen may show a warning. Choose "More info" → "Run anyway" if you trust this build.
+- On first use of `grep`/`glob`, OpenCode may download `ripgrep` automatically. This is standard OpenCode behavior; everything else in the bundle is self-contained.
+- The Windows binary is **unsigned**, so Windows SmartScreen may show a warning. Choose "More info" → "Run anyway" if you trust this build.
+- The Linux binaries are **unsigned** too: no distro packages, no signing or notarization step. Some browsers may warn on download; check the SHA-256 above.
 
 ---
 
@@ -85,9 +129,9 @@ exact `git apply` commands and the current patch contents.
 
 ---
 
-## Install into PATH (optional)
+## Install into PATH (optional, Windows)
 
-The `scripts/` folder contains helpers that point a command on your `PATH` at the patched standalone binary:
+On Windows, the `scripts/` folder contains helpers that point a command on your `PATH` at the patched standalone binary:
 
 | Script | Purpose |
 |--------|---------|
@@ -106,11 +150,23 @@ powershell -ExecutionPolicy Bypass -File scripts\revert-patched.ps1
 
 The generated `%USERPROFILE%\.opencode-patched\opencode.cmd` launches the patched binary from this artifact.
 
+**Linux:** the PowerShell helpers above and the generated `opencode.cmd` do not
+apply. Move or link the extracted binary somewhere on your `PATH` instead:
+
+```bash
+install -m 755 opencode ~/.local/bin/opencode
+```
+
+`~/.local/bin` is on `PATH` by default on most distributions; otherwise add it to
+your shell profile, or install to `/usr/local/bin` with `sudo install -m 755 opencode /usr/local/bin/opencode`.
+
 ---
 
 ## Build from source (optional)
 
-If you would rather build the binary yourself from the patched source tree:
+If you would rather build the binaries yourself from the patched source tree:
+
+**Windows x64:**
 
 ```powershell
 cd packages/cli
@@ -118,6 +174,28 @@ $env:OPENCODE_VERSION="2.1.4-patched"; $env:OPENCODE_CHANNEL="prod"
 bun --bun ./script/build.ts --target=opencode-windows-x64 --skip-install
 # => packages/cli/dist/cli-windows-x64/bin/opencode.exe
 ```
+
+**Linux x64 / arm64:**
+
+```bash
+cd packages/cli
+export OPENCODE_VERSION="2.1.4-patched" OPENCODE_CHANNEL="prod"
+
+bun --bun ./script/build.ts --target=opencode-linux-x64
+# => packages/cli/dist/cli-linux-x64/bin/opencode
+
+bun --bun ./script/build.ts --target=opencode-linux-arm64
+# => packages/cli/dist/cli-linux-arm64/bin/opencode
+```
+
+Both Linux binaries are glibc (gnu) builds; the `linux-arm64` target cross-compiles
+on an x86_64 host.
+
+**Native dependencies.** The `--skip-install` flag in the Windows recipe is only
+safe once the target's native packages are present. A fresh clone needs them, so
+either omit `--skip-install` for the first build of a target (the script then
+runs `bun install --os="*" --cpu="*" --libc="*"` so the target native packages
+are installed) or run `bun install` first. After that, `--skip-install` is fine.
 
 The build requires **bun 1.4.4** (the version pinned by the root
 `packageManager` field).
