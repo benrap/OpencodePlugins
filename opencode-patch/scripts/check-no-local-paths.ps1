@@ -41,8 +41,8 @@ $pattern = 'C:[\\/]+Users[\\/]|Users[\\/]+benrap|AppData[\\/]|opencode-waiting|C
 # exclude them from the scan (they are checked by the self-test instead).
 $paths = @(
     '.'
-    ':(exclude)patched-opencode/scripts/check-no-local-paths.ps1'
-    ':(exclude)patched-opencode/scripts/test-no-local-paths-guard.ps1'
+    ':(exclude)opencode-patch/scripts/check-no-local-paths.ps1'
+    ':(exclude)opencode-patch/scripts/test-no-local-paths-guard.ps1'
 )
 
 $matches = & git -C $RepoRoot grep -n -I -i -E $pattern -- $paths

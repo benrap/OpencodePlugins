@@ -1,13 +1,13 @@
 {
-  "name": "subagent-abort-tui",
+  "name": "local-opencode-subagent-sidebar-tree",
   "version": "1.0.0",
-  "description": "OpenCode V2 TUI plugin that aborts (interrupts) the child subagent session you are currently viewing, via ctrl+d or /abort.",
+  "description": "OpenCode V2 TUI plugin that shows live child subagent sessions in the sidebar as a nested tree.",
   "license": "MIT",
   "author": "benrap",
   "repository": {
     "type": "git",
     "url": "https://github.com/benrap/OpencodePlugins.git",
-    "directory": "subagent-abort-tui"
+    "directory": "plugins/subagent-sidebar-tree"
   },
   "type": "module",
   "main": "./server.ts",
@@ -22,7 +22,7 @@
   "files": [
     "tui.tsx",
     "server.ts",
-    "abort.ts"
+    "subagent-view.ts"
   ],
   "engines": {
     "node": ">=22"

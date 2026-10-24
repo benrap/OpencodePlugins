@@ -91,7 +91,7 @@ The function never throws; every path returns `{ content }`.
 Register the plugin path in `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
-{ "plugins": [{ "package": "<repo-root>\\subagent-message" }] }
+{ "plugins": [{ "package": "<repo-root>\\plugins\\subagent-message" }] }
 ```
 
 `server.ts` exports `{ id: "subagent-message", setup(ctx) }`; `setup` calls
@@ -126,6 +126,6 @@ e.g.:
 Requires Node.js >= 22 (uses `--experimental-strip-types`). From the repo root:
 
 ```bash
-node --experimental-strip-types subagent-message/test/subagent-message.test.mjs
-node --experimental-strip-types subagent-message/test/subagent-message-server-safe.test.mjs
+node --experimental-strip-types plugins/subagent-message/test/subagent-message.test.mjs
+node --experimental-strip-types plugins/subagent-message/test/subagent-message-server-safe.test.mjs
 ```

@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/benrap/OpencodePlugins.git",
-    "directory": "subagent-steer"
+    "directory": "plugins/subagent-steer"
   },
   "type": "module",
   "main": "./server.ts",

@@ -28,7 +28,7 @@ provided, it defaults to `['shell', 'subagent']`.
 {
   "plugins": [
     {
-      "package": "./always-background",
+      "package": "./plugins/always-background",
       "options": { "exclude": ["shell", "subagent"] }
     }
   ]
@@ -38,13 +38,13 @@ provided, it defaults to `['shell', 'subagent']`.
 ## Install
 
 ```bash
-opencode plugin add ./always-background
+opencode plugin add ./plugins/always-background
 ```
 
 Or reference the path in `opencode.jsonc`:
 
 ```jsonc
-{ "plugins": [{ "package": "./always-background" }] }
+{ "plugins": [{ "package": "./plugins/always-background" }] }
 ```
 
 ## Debug logging

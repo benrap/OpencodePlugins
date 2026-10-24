@@ -3,17 +3,22 @@
 A collection of OpenCode V2 plugins, one agent, and a patched-build shim, all
 sourced from this repo.
 
+The repo has three top-level directories: `plugins/` holds the plugin packages,
+`agents/` holds agent definitions, and `opencode-patch/` holds the patched-build
+shim. Root-level files (`README.md`, `LICENSE`, `.gitignore`) are repo
+housekeeping.
+
 | Item | Type | Description |
 | --- | --- | --- |
-| [`subagent-abort`](./subagent-abort) | server | Registers the `abort_subagent` tool to interrupt active descendant subagent sessions of the calling session (one named descendant, or every running descendant). |
-| [`subagent-abort-tui`](./subagent-abort-tui) | TUI | TUI command (`ctrl+d` / `/abort`) that aborts (interrupts) the child subagent session currently in view **and all of its descendant subagents, recursively**; child-only — does nothing on a main session. Aborting terminates them cleanly: the aborted sessions do not resume, so there is no follow-up activity. |
-| [`subagent-message`](./subagent-message) | server | Registers the `message_agent` tool for lineage-scoped agent-to-agent messaging: send to your parent or a direct child only (siblings, non-descendants, and level-skips rejected). Steers an active target, otherwise queues a follow-up. |
-| [`subagent-sidebar-tree`](./subagent-sidebar-tree) | TUI | TUI sidebar panel showing child subagent sessions as a nested tree — always sorted by spawn time (newest first, recursively), with a button to toggle showing done/interrupted sessions. |
-| [`subagent-status`](./subagent-status) | server | `subagent-status` tool that probes a subagent's state without pulling its raw transcript into the caller's context. Three modes: `state` (lightweight, no LLM call), `summary` (default; adds an LLM summary), and `all` (the name and state of every active subagent, no LLM call). |
-| [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
-| [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
-| [`always-background`](./always-background) | server | Forces background execution for every tool call **except** `shell` and `subagent` via the `execute.before` hook; the exclude list is configurable. |
-| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build on an upstream v2.1.4 base (sidebar `parentID` gate removal, waiting/tick fix, child-session inline steer composer, foreground-only interrupt via `cancelBackground`, non-reviving cancellation so abort does not restart the subagent, and parked-`waiting` settlement so an aborted owner returns to idle), with a canonical combined patch (`patches/v2.1.4.patch`) plus the five per-fix patches (`0001`–`0005`, including `0004-cancel-background-interrupt` and `0005-abort-does-not-resume`), and switch/revert scripts. |
+| [`subagent-abort`](./plugins/subagent-abort) | server | Registers the `abort_subagent` tool to interrupt active descendant subagent sessions of the calling session (one named descendant, or every running descendant). |
+| [`subagent-abort-tui`](./plugins/subagent-abort-tui) | TUI | TUI command (`ctrl+d` / `/abort`) that aborts (interrupts) the child subagent session currently in view **and all of its descendant subagents, recursively**; child-only — does nothing on a main session. Aborting terminates them cleanly: the aborted sessions do not resume, so there is no follow-up activity. |
+| [`subagent-message`](./plugins/subagent-message) | server | Registers the `message_agent` tool for lineage-scoped agent-to-agent messaging: send to your parent or a direct child only (siblings, non-descendants, and level-skips rejected). Steers an active target, otherwise queues a follow-up. |
+| [`subagent-sidebar-tree`](./plugins/subagent-sidebar-tree) | TUI | TUI sidebar panel showing child subagent sessions as a nested tree — always sorted by spawn time (newest first, recursively), with a button to toggle showing done/interrupted sessions. |
+| [`subagent-status`](./plugins/subagent-status) | server | `subagent-status` tool that probes a subagent's state without pulling its raw transcript into the caller's context. Three modes: `state` (lightweight, no LLM call), `summary` (default; adds an LLM summary), and `all` (the name and state of every active subagent, no LLM call). |
+| [`keep-awake`](./plugins/keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
+| [`prefill`](./plugins/prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
+| [`always-background`](./plugins/always-background) | server | Forces background execution for every tool call **except** `shell` and `subagent` via the `execute.before` hook; the exclude list is configurable. |
+| [`opencode-patch`](./opencode-patch) | tooling | Reversible shim that makes `opencode` launch a patched build on an upstream v2.1.4 base (sidebar `parentID` gate removal, waiting/tick fix, child-session inline steer composer, foreground-only interrupt via `cancelBackground`, non-reviving cancellation so abort does not restart the subagent, and parked-`waiting` settlement so an aborted owner returns to idle), with a canonical combined patch (`patches/v2.1.4.patch`) plus the five per-fix patches (`0001`–`0005`, including `0004-cancel-background-interrupt` and `0005-abort-does-not-resume`), and switch/revert scripts. |
 | [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `subagent-status`, `subagent-abort`, `message_agent`, `question`, and `skill` tools are allowed, everything else denied. |
 
 ## Installation instructions (for AI agents)
@@ -25,11 +30,11 @@ your own. Config root: `~/.config/opencode` (`$env:USERPROFILE\.config\opencode`
 
 Add entries to the top-level `"plugins"` array. `subagent-abort`,
 `subagent-abort-tui`, `subagent-message`, `subagent-sidebar-tree`, and
-`subagent-status` are
-referenced **directly from this checkout** (path-based, no copy step).
+`subagent-status` are referenced **directly from this checkout** (path-based,
+no copy step), so their `<repo-root>` paths point into `plugins/`.
 `keep-awake`, `always-background`, and `prefill` load from
 `~/.config/opencode/plugins/<name>/`, which must contain a **copy** (never a
-symlink) of the repo folder.
+symlink) of the repo's `plugins/<name>/` folder.
 
 ```jsonc
 {
@@ -40,11 +45,11 @@ symlink) of the repo folder.
     { "package": "%USERPROFILE%\\.config\\opencode\\plugins\\prefill",
       "options": { "mode": "think-reply-continue", "thinkingSeed": "I should answer...",
                    "seed": "I will give my answer:", "userSeed": "Continue" } },
-    { "package": "<repo-root>\\subagent-abort" },
-    { "package": "<repo-root>\\subagent-abort-tui" },
-    { "package": "<repo-root>\\subagent-status" },
-    { "package": "<repo-root>\\subagent-message" },
-    { "package": "<repo-root>\\subagent-sidebar-tree" }
+    { "package": "<repo-root>\\plugins\\subagent-abort" },
+    { "package": "<repo-root>\\plugins\\subagent-abort-tui" },
+    { "package": "<repo-root>\\plugins\\subagent-status" },
+    { "package": "<repo-root>\\plugins\\subagent-message" },
+    { "package": "<repo-root>\\plugins\\subagent-sidebar-tree" }
   ],
   "keybinds": {
     "app.exit": "ctrl+c,<leader>q"
@@ -67,7 +72,7 @@ Keep each plugin's existing entry (especially `prefill`'s `options` and
 Run from this repo root to copy a plugin into its live dir (repeat per plugin):
 
 ```powershell
-Copy-Item -Recurse -Force .\keep-awake\* "$env:USERPROFILE\.config\opencode\plugins\keep-awake\"
+Copy-Item -Recurse -Force .\plugins\keep-awake\* "$env:USERPROFILE\.config\opencode\plugins\keep-awake\"
 ```
 
 The directly-referenced plugins (`subagent-abort`, `subagent-message`,
@@ -84,25 +89,25 @@ Copy the definition into it:
 Copy-Item -Force .\agents\forced-orchestrator.md "$env:USERPROFILE\.config\opencode\agents\forced-orchestrator.md"
 ```
 
-### 4. Install the patched-openCode shim (optional)
+### 4. Install the `opencode-patch` shim (optional)
 
-`patched-opencode/` makes the `opencode` command resolve to the patched build
+`opencode-patch/` makes the `opencode` command resolve to the patched build
 (standalone binary first, with a source fallback), without touching the stock
 installation. Apply it with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\patched-opencode\scripts\switch-patched.ps1
+powershell -ExecutionPolicy Bypass -File .\opencode-patch\scripts\switch-patched.ps1
 ```
 
 Open a **new** shell and verify (`opencode --version` prints `opencode v2.1.4-patched`).
-Revert with `scripts\revert-patched.ps1`; fresh installs can create the shim dir
-with `scripts\install-shim.ps1`. See
-[`patched-opencode/README.md`](./patched-opencode/README.md) for the patch
+Revert with `.\opencode-patch\scripts\revert-patched.ps1`; fresh installs can
+create the shim dir with `.\opencode-patch\scripts\install-shim.ps1`. See
+[`opencode-patch/README.md`](./opencode-patch/README.md) for the patch
 contents, install details, and the optional build-from-source recipe.
 
 ### 5. Run the tests
 
-From `subagent-sidebar-tree/` (the `.mjs` suites are portable):
+From `plugins/subagent-sidebar-tree/` (the `.mjs` suites are portable):
 
 ```bash
 node --experimental-strip-types test/subagent-sidebar-tree.test.mjs
@@ -110,7 +115,7 @@ node --experimental-strip-types test/subagent-server-safe.test.mjs
 node test/tui-jsx-sanity.mjs tui.tsx
 ```
 
-`subagent-abort` has its own portable suite. From `subagent-abort/`:
+`subagent-abort` has its own portable suite. From `plugins/subagent-abort/`:
 
 ```bash
 node --experimental-strip-types test/subagent-abort.test.mjs
@@ -119,14 +124,14 @@ node --experimental-strip-types test/subagent-abort.test.mjs
 `subagent-message` has its own portable suite. From this repo root:
 
 ```bash
-node --experimental-strip-types subagent-message/test/subagent-message.test.mjs
-node --experimental-strip-types subagent-message/test/subagent-message-server-safe.test.mjs
+node --experimental-strip-types plugins/subagent-message/test/subagent-message.test.mjs
+node --experimental-strip-types plugins/subagent-message/test/subagent-message-server-safe.test.mjs
 ```
 
 The bun harness runners copy sources into a temp dir, link OpenTUI
 `node_modules`, run `bun test`, and clean up. Point `OPENTUI_NODE_MODULES` at a
 `node_modules` containing `@opentui/core`, `@opentui/solid`, and `solid-js` if
-the default is wrong:
+the default is wrong. From `plugins/subagent-sidebar-tree/`:
 
 ```bash
 node test/run-visibility-test.mjs
@@ -135,10 +140,10 @@ node test/run-unified-test.mjs
 node test/run-panel-test.mjs
 ```
 
-`keep-awake` has its own portable suite:
+`keep-awake` has its own portable suite. From this repo root:
 
 ```bash
-node keep-awake/test/keep-awake.test.mjs
+node plugins/keep-awake/test/keep-awake.test.mjs
 ```
 
 ### 6. Behavior notes
@@ -150,8 +155,8 @@ node keep-awake/test/keep-awake.test.mjs
 - `subagent-status` defaults to `summary` mode (state + a 2-4 sentence LLM summary). Pass `mode: "state"` for a cheap status check (`running`/`idle`/`waiting`/`finished`) with no LLM call.
 - `always-background` forces `background: true` on every tool call except those in its `exclude` list (default `["shell", "subagent"]`, which keep their own user-controlled `background` input).
 - `keep-awake` keeps the machine awake but lets the display sleep (`keepDisplayOn`/`mode: "display"` to keep it on).
-- `patched-opencode` is a PATH shim, not a plugin: it launches the patched build (standalone binary first, with a `bun run` source fallback). Its patch set — canonical combined `patches/v2.1.4.patch` on an upstream v2.1.4 base, with the per-fix `0001`–`0005` breakdown (`0001` sidebar-gate removal, `0002` waiting-status/tick fix, `0003` child inline steer composer, `0004` `cancelBackground` / foreground-only interrupt, `0005` non-reviving cancellation and parked-owner settlement) — adds the waiting/tick fix, removes the subagent sidebar gate, adds the child inline steer composer, makes a default interrupt foreground-only (`Esc Esc` stops only the foreground turn and leaves background tasks alone; `cancelBackground: true` restores the full stop and is used by `Session.remove` and the revert/teardown paths), and makes a cancelled job's notice non-reviving so aborting a subagent terminates it cleanly instead of restarting it. When that cancellation clears a waiting owner's last background marker, `settleWaitingIfIdle` publishes its interrupted terminal and releases the claim, so the owner returns to idle instead of staying stuck in `waiting`. Upstream v2.1.4 redesigned its inactivity reaper (PR #57416) so it no longer interrupts sessions, so that old reaper hunk is intentionally not ported.
+- `opencode-patch` is a PATH shim, not a plugin: it launches the patched build (standalone binary first, with a `bun run` source fallback). Its patch set — canonical combined `patches/v2.1.4.patch` on an upstream v2.1.4 base, with the per-fix `0001`–`0005` breakdown (`0001` sidebar-gate removal, `0002` waiting-status/tick fix, `0003` child inline steer composer, `0004` `cancelBackground` / foreground-only interrupt, `0005` non-reviving cancellation and parked-owner settlement) — adds the waiting/tick fix, removes the subagent sidebar gate, adds the child inline steer composer, makes a default interrupt foreground-only (`Esc Esc` stops only the foreground turn and leaves background tasks alone; `cancelBackground: true` restores the full stop and is used by `Session.remove` and the revert/teardown paths), and makes a cancelled job's notice non-reviving so aborting a subagent terminates it cleanly instead of restarting it. When that cancellation clears a waiting owner's last background marker, `settleWaitingIfIdle` publishes its interrupted terminal and releases the claim, so the owner returns to idle instead of staying stuck in `waiting`. Upstream v2.1.4 redesigned its inactivity reaper (PR #57416) so it no longer interrupts sessions, so that old reaper hunk is intentionally not ported.
 
 ## License
 
-MIT. See [LICENSE](./LICENSE). `subagent-sidebar-tree` is a derivative work based on `@madsoftwaredev/opencode-subagent-sidebar` (MIT); see [`subagent-sidebar-tree/LICENSE`](./subagent-sidebar-tree/LICENSE).
+MIT. See [LICENSE](./LICENSE). `subagent-sidebar-tree` is a derivative work based on `@madsoftwaredev/opencode-subagent-sidebar` (MIT); see [`plugins/subagent-sidebar-tree/LICENSE`](./plugins/subagent-sidebar-tree/LICENSE).

@@ -30,12 +30,12 @@ $hookPath = Join-Path $hooksDir 'pre-commit'
 $content = @'
 #!/bin/sh
 # Reject machine-specific local filesystem paths (installed by
-# patched-opencode/scripts/install-git-hooks.ps1).
+# opencode-patch/scripts/install-git-hooks.ps1).
 root="$(git rev-parse --show-toplevel)" || exit 1
 if command -v powershell >/dev/null 2>&1; then
-  exec powershell -NoProfile -ExecutionPolicy Bypass -File "$root/patched-opencode/scripts/check-no-local-paths.ps1" -RepoRoot "$root"
+  exec powershell -NoProfile -ExecutionPolicy Bypass -File "$root/opencode-patch/scripts/check-no-local-paths.ps1" -RepoRoot "$root"
 elif command -v pwsh >/dev/null 2>&1; then
-  exec pwsh -NoProfile -ExecutionPolicy Bypass -File "$root/patched-opencode/scripts/check-no-local-paths.ps1" -RepoRoot "$root"
+  exec pwsh -NoProfile -ExecutionPolicy Bypass -File "$root/opencode-patch/scripts/check-no-local-paths.ps1" -RepoRoot "$root"
 else
   echo "pre-commit: PowerShell not found; skipping local-path guard" >&2
   exit 0

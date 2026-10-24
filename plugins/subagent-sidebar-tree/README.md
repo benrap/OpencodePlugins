@@ -40,13 +40,13 @@ are shown, never their order.
 ## Install
 
 ```bash
-opencode plugin add ./subagent-sidebar-tree
+opencode plugin add ./plugins/subagent-sidebar-tree
 ```
 
 Or reference the path in `opencode.jsonc`:
 
 ```jsonc
-{ "plugins": [{ "package": "./subagent-sidebar-tree" }] }
+{ "plugins": [{ "package": "./plugins/subagent-sidebar-tree" }] }
 ```
 
 The plugin exposes a no-op `server` entrypoint and the `tui` entrypoint declared
