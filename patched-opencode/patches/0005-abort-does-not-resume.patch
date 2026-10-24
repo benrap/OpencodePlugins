@@ -1,0 +1,775 @@
+# 0005: cancelled shell/subagent notices do not resume their owner.
+# A cancelled background shell or subagent still records its notice for context, but sends
+# resume: false so aborting does not start a fresh model turn; after clearing its marker it
+# asks the execution layer to settle a parked waiting owner. Adds regression coverage for
+# the cancelled-child settle path. Regenerated against opencode v2.1.4
+# (68bc26b7da1990ce10ffecfbc1e09eb13aa5d824).
+diff --git a/packages/app/src/session/revert.ts b/packages/app/src/session/revert.ts
+index ca79e16..8d8f8e5 100644
+--- a/packages/app/src/session/revert.ts
++++ b/packages/app/src/session/revert.ts
+@@ -64,8 +64,10 @@ export function createSessionRevert(input: {
+ 
+     // Interrupt acknowledges before the execution settles, and staging a busy Session fails. The
+     // local status can lag the server either way, so always settle first; both are idle no-ops.
++    // Cancel durable background work too: a Session parked in `waiting` has no foreground turn
++    // to interrupt, and leaving its work running would let it resume after the revert.
+     // Like the TUI, stop at the first failure instead of waiting on work that was never interrupted.
+-    if (!(await request(() => server.api.session.interrupt({ sessionID })))) return
++    if (!(await request(() => server.api.session.interrupt({ sessionID, cancelBackground: true })))) return
+ 
+     if (!(await request(() => server.api.session.wait({ sessionID })))) return
+ 
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+index 332661f..237be09 100644
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -232,6 +232,8 @@ export interface Interface {
+     sessionID: SessionSchema.ID,
+     options?: { readonly resume?: boolean; readonly cancelBackground?: boolean },
+   ) => Effect.Effect<boolean>
++  /** Settles a Session parked in `waiting` once no durable background work remains, without starting a turn. */
++  readonly settleWaitingIfIdle: (sessionID: SessionSchema.ID) => Effect.Effect<boolean>
+   readonly synthetic: (
+     input: Parameters<Session.Handle["synthetic"]>[0] & { sessionID: SessionSchema.ID },
+   ) => ReturnType<Session.Handle["synthetic"]>
+@@ -497,6 +499,7 @@ const layer = Layer.effect(
+       resume: (sessionID) => sessions.forSession(sessionID).resume(),
+       synthetic: (input) => sessions.forSession(input.sessionID).synthetic(input),
+       interrupt: (sessionID, options) => sessions.forSession(sessionID).interrupt(options),
++      settleWaitingIfIdle: execution.settleWaitingIfIdle,
+       revert: {
+         stage: (input) => sessions.forSession(input.sessionID).revert.stage(input),
+         clear: (sessionID) => sessions.forSession(sessionID).revert.clear(),
+diff --git a/packages/core/src/session/execution.ts b/packages/core/src/session/execution.ts
+index b6f37c4..77c385c 100644
+--- a/packages/core/src/session/execution.ts
++++ b/packages/core/src/session/execution.ts
+@@ -40,6 +40,12 @@ export interface Interface {
+       readonly cancelBackground?: boolean
+     },
+   ) => Effect.Effect<boolean>
++  /**
++   * Settles a Session parked in `waiting` once no durable background work remains.
++   * Publishes exactly one interrupted terminal and releases the execution claim; it does
++   * not start a turn. Returns whether this call settled the Session.
++   */
++  readonly settleWaitingIfIdle: (sessionID: SessionSchema.ID) => Effect.Effect<boolean>
+   /** Resolves once this process owns no active execution for the Session. Returns immediately when idle and never starts work. */
+   readonly awaitIdle: (sessionID: SessionSchema.ID) => Effect.Effect<void>
+ }
+@@ -115,16 +121,25 @@ export const layer = Layer.effect(
+     // `Service.interrupt` runs and consumed by whichever settlement path handles it: the
+     // coordinator's settled hook for a live turn, or the parked-Session branch of `interrupt`.
+     const cancelBackgroundOnInterrupt = new Set<SessionSchema.ID>()
++    // Sessions parked in `waiting`: a turn settled with durable background markers still
++    // outstanding, so the claim is held without an execution. Once the last marker clears
++    // (for example a cancelled child's notice) nothing else publishes their terminal, so
++    // `settleWaitingIfIdle` finishes them explicitly.
++    const waiting = new Set<SessionSchema.ID>()
+     // Late-bound so the settled hook can stop a subagent child without depending on the
+     // coordinator binding that is still being constructed below.
+     const interruptChild = (sessionID: SessionSchema.ID): Effect.Effect<boolean> =>
+       coordinator.interrupt(sessionID, "user")
+     const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError, InterruptReason>({
+       started: (sessionID) =>
+-        reportLifecycle(
+-          sessionID,
+-          bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID)),
+-        ),
++        Effect.suspend(() => {
++          // A fresh execution is no longer parked: its terminal will settle it.
++          waiting.delete(sessionID)
++          return reportLifecycle(
++            sessionID,
++            bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID)),
++          )
++        }),
+       drain: (sessionID, force, promotable) => drain(sessionID, force, undefined, promotable),
+       // One terminal observation per busy period, covering every coalesced drain.
+       settled: (sessionID, exit, reason) =>
+@@ -143,13 +158,16 @@ export const layer = Layer.effect(
+                 // and keep the execution claim on purpose — the turn is still in flight. The
+                 // preserved claim is what the boot sweep resumes after recovering durable
+                 // background markers (session/execution/restart.ts).
++                waiting.add(sessionID)
+                 yield* bus.publish(SessionStatusEvent.Status, { sessionID, status: { type: "waiting" } })
+                 return
+               }
++              waiting.delete(sessionID)
+               yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
+               return
+             }
+             if (outcome.type === "interrupted") {
++              waiting.delete(sessionID)
+               // Deliberate stops release the claim; shutdown keeps it for restart continuity.
+               if (outcome.reason !== "shutdown") yield* jobs.cancel(sessionID)
+               // Cancelling durable background work is opt-in: a default foreground-only
+@@ -171,6 +189,7 @@ export const layer = Layer.effect(
+               )
+               return
+             }
++            waiting.delete(sessionID)
+             yield* bus.publish(
+               SessionEvent.Execution.Failed,
+               {
+@@ -183,6 +202,23 @@ export const layer = Layer.effect(
+         ),
+     })
+ 
++    // A Session parked in `waiting` has no execution whose settled hook could publish its
++    // terminal. When its last durable background marker clears, this finishes the parked
++    // turn: exactly one interrupted terminal and the claim release, with no new turn.
++    const settleWaitingIfIdle = (sessionID: SessionSchema.ID): Effect.Effect<boolean> =>
++      Effect.gen(function* () {
++        if (!waiting.has(sessionID)) return false
++        if (yield* coordinator.isActive(sessionID)) return false
++        if (yield* jobs.awaiting(sessionID)) return false
++        waiting.delete(sessionID)
++        yield* bus.publish(
++          SessionEvent.Execution.Interrupted,
++          { sessionID, reason: "user" },
++          releaseOnCommit(sessionID),
++        )
++        return true
++      })
++
+     return Service.of({
+       active: coordinator.active,
+       isActive: coordinator.isActive,
+@@ -215,12 +251,17 @@ export const layer = Layer.effect(
+                 yield* Effect.forEach(pending, (job) => jobs.completeBackground(job.notificationID), {
+                   discard: true,
+                 })
++                waiting.delete(sessionID)
+                 yield* bus.publish(
+                   SessionEvent.Execution.Interrupted,
+                   { sessionID, reason: "user" },
+                   releaseOnCommit(sessionID),
+                 )
+                 handled = true
++              } else if (yield* settleWaitingIfIdle(sessionID)) {
++                // The last marker already cleared (its cancellation notice was admitted), so
++                // the parked turn only needs its missing terminal and claim release.
++                handled = true
+               }
+             }
+             // No execution was interrupted, so no settled hook will consume the opt-in.
+@@ -243,6 +284,7 @@ export const layer = Layer.effect(
+         }),
+       resume: coordinator.run,
+       wake: coordinator.wake,
++      settleWaitingIfIdle,
+       awaitIdle: coordinator.awaitIdle,
+     })
+   }),
+@@ -263,6 +305,7 @@ export const noopLayer = Layer.succeed(
+     resume: () => Effect.void,
+     wake: () => Effect.void,
+     interrupt: () => Effect.succeed(false),
++    settleWaitingIfIdle: () => Effect.succeed(false),
+     awaitIdle: () => Effect.void,
+   }),
+ )
+diff --git a/packages/core/src/session/subagent-completion.ts b/packages/core/src/session/subagent-completion.ts
+index dbd690c..27be4dc 100644
+--- a/packages/core/src/session/subagent-completion.ts
++++ b/packages/core/src/session/subagent-completion.ts
+@@ -47,7 +47,7 @@ export const finalText = Effect.fnUntraced(function* (input: {
+ })
+ 
+ export const deliver = Effect.fnUntraced(function* (
+-  sessions: Pick<Session.Interface, "synthetic">,
++  sessions: Pick<Session.Interface, "synthetic" | "settleWaitingIfIdle">,
+   jobs: Pick<Job.Interface, "completeBackground">,
+   input: Pick<Job.Info, "status" | "output" | "error" | "notificationID"> & {
+     recovery: Extract<Job.Recovery, { kind: "subagent" }>
+@@ -65,10 +65,16 @@ export const deliver = Effect.fnUntraced(function* (
+   yield* sessions.synthetic({
+     ...(input.notificationID ? { id: input.notificationID } : {}),
+     sessionID: recovery.parentSessionID,
+-    ...(input.resume === false ? { resume: false } : {}),
++    // A cancelled child is admitted for context, but only a real completion or failure
++    // should revive the parent; cancellation is the parent's own abort taking effect.
++    ...(input.resume === false || input.status === "cancelled" ? { resume: false } : {}),
+     description: recovery.description,
+     text: `<subagent sessionID="${recovery.childSessionID}" state="${input.status}" description="${recovery.description}">\n${text}\n</subagent>`,
+     metadata: { source: "subagent", childID: recovery.childSessionID, agent: recovery.agent, state: input.status },
+   })
+   if (input.notificationID) yield* jobs.completeBackground(input.notificationID)
++  // A cancelled child's notice deliberately does not resume the parent. If that notice was
++  // the parent's last durable marker, nothing else will publish the parent's terminal, so
++  // finish the parked turn here instead of leaving it `waiting` with the claim held.
++  if (input.status === "cancelled") yield* sessions.settleWaitingIfIdle(recovery.parentSessionID)
+ })
+diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
+index af454a7..156af04 100644
+--- a/packages/core/src/tool/plugin/shell.ts
++++ b/packages/core/src/tool/plugin/shell.ts
+@@ -174,6 +174,9 @@ export const Plugin = {
+           ...(info.notificationID ? { id: info.notificationID } : {}),
+           sessionID,
+           description: command,
++          // A cancelled job's notice is still admitted, but it must not revive an idle
++          // owner: only a real completion (or failure) is worth a new model turn.
++          ...(info.status === "cancelled" ? { resume: false } : {}),
+           ...ShellResult.notification({
+             jobID: id,
+             shellID,
+@@ -184,6 +187,9 @@ export const Plugin = {
+           }),
+         })
+         if (info.notificationID) yield* jobs.completeBackground(info.notificationID)
++        // A cancelled shell's notice does not resume its owner. If it was the owner's last
++        // durable marker, settle the parked `waiting` turn that nothing else will terminalize.
++        if (info.status === "cancelled") yield* sessions.settleWaitingIfIdle(sessionID)
+       },
+       Effect.forkIn(scope, { startImmediately: true }),
+     )
+diff --git a/packages/core/src/tool/plugin/subagent.ts b/packages/core/src/tool/plugin/subagent.ts
+index 0ff32a5..1d0a700 100644
+--- a/packages/core/src/tool/plugin/subagent.ts
++++ b/packages/core/src/tool/plugin/subagent.ts
+@@ -233,7 +233,7 @@ export const Plugin = {
+ 
+               const result = yield* jobs.block({ id: child.id, sessionID: context.sessionID }).pipe(
+                 Effect.onInterrupt(() =>
+-                  Effect.all([sessions.interrupt(child.id), jobs.cancel(child.id)], {
++                  Effect.all([sessions.interrupt(child.id, { cancelBackground: true }), jobs.cancel(child.id)], {
+                     discard: true,
+                   }),
+                 ),
+diff --git a/packages/core/test/session-execution.test.ts b/packages/core/test/session-execution.test.ts
+index 46e1674..63398e3 100644
+--- a/packages/core/test/session-execution.test.ts
++++ b/packages/core/test/session-execution.test.ts
+@@ -21,6 +21,7 @@ import { SessionStatusEvent } from "@opencode/schema/session-status-event"
+ import { SessionInbox } from "@opencode/core/session/inbox"
+ import { SessionMessage } from "@opencode/core/session/message"
+ import { SessionRunner } from "@opencode/core/session/runner/index"
++import { SubagentCompletion } from "@opencode/core/session/subagent-completion"
+ import { SessionInboxTable, SessionTable } from "@opencode/core/session/sql"
+ import { SessionStore } from "@opencode/core/session/store"
+ import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Scope } from "effect"
+@@ -157,7 +158,7 @@ describe("SessionExecution lifecycle", () => {
+     }),
+   )
+ 
+-  it.effect("does not resume a user-cancelled background child whose notification was not admitted", () =>
++  it.effect("admits a user-cancelled background child's notice without reviving the parent", () =>
+     Effect.gen(function* () {
+       const database = yield* Database.Service
+       const parent = Session.ID.make("ses_cancelled_background_parent")
+@@ -209,7 +210,9 @@ describe("SessionExecution lifecycle", () => {
+       )
+       yield* Context.get(restarted, SessionRestart.Service).resumeSuspendedSessions
+       yield* Context.get(restarted, SessionExecution.Service).awaitIdle(parent)
+-      expect(drained).toEqual([parent])
++      // The cancelled notice is admitted for context, but cancellation must not revive the
++      // parent: only a real completion or failure wakes an idle owner.
++      expect(drained).toEqual([])
+       expect(yield* SessionInbox.list(database.db, parent)).toMatchObject([
+         { payload: { text: expect.stringContaining("Subagent cancelled"), metadata: { state: "cancelled" } } },
+       ])
+@@ -217,6 +220,41 @@ describe("SessionExecution lifecycle", () => {
+     }),
+   )
+ 
++  it.effect("delivers a cancelled subagent notice without waking the parent, but a completed one still wakes", () =>
++    Effect.gen(function* () {
++      const database = yield* Database.Service
++      const parent = Session.ID.make("ses_subagent_notice_parent")
++      yield* seedSessions(database, [parent])
++
++      const drained: Session.ID[] = []
++      const scope = yield* Scope.make()
++      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
++      // This harness turns a resuming admission into an execution drain, so a wake is
++      // observable as a new turn for the owner.
++      const context = yield* buildExecution(scope, ({ sessionID }) => Effect.sync(() => void drained.push(sessionID)))
++      const sessions = Context.get(context, Session.Service)
++      const execution = Context.get(context, SessionExecution.Service)
++      const jobs = yield* Job.Service
++      const recovery = {
++        kind: "subagent" as const,
++        parentSessionID: parent,
++        childSessionID: Session.ID.make("ses_subagent_notice_child"),
++        agent: "general",
++        description: "Cancelled inspection",
++      }
++
++      // Cancellation is admitted into the parent's context but must not revive it.
++      yield* SubagentCompletion.deliver(sessions, jobs, { status: "cancelled", recovery })
++      yield* execution.awaitIdle(parent)
++      expect(drained).toEqual([])
++
++      // A normal completion still wakes the parent to react.
++      yield* SubagentCompletion.deliver(sessions, jobs, { status: "completed", output: "done", recovery })
++      yield* execution.awaitIdle(parent)
++      expect(drained).toEqual([parent])
++    }),
++  )
++
+   it.effect("starts every claimed execution without waiting for earlier drains to finish", () =>
+     Effect.gen(function* () {
+       const database = yield* Database.Service
+@@ -511,6 +549,159 @@ describe("SessionExecution lifecycle", () => {
+     }),
+   )
+ 
++  it.effect("settles a waiting parent when a cancelled child clears its last marker", () =>
++    Effect.gen(function* () {
++      const database = yield* Database.Service
++      const bus = yield* Bus.Service
++      const jobs = yield* Job.Service
++      const parent = Session.ID.make("ses_waiting_cancelled_child_parent")
++      const child = Session.ID.make("ses_waiting_cancelled_child")
++      yield* seedSessions(database, [parent])
++      yield* seedSessions(database, [child], { parent_id: parent })
++
++      const recovery = {
++        kind: "subagent" as const,
++        parentSessionID: parent,
++        childSessionID: child,
++        agent: "general",
++        description: "Cancelled inspection",
++      }
++      yield* jobs.start({ id: child, type: "subagent", recovery, run: Effect.never })
++      const marker = yield* jobs.background(child)
++      if (!marker?.notificationID) return yield* Effect.die("expected background marker")
++
++      // Record every execution lifecycle event, not just terminals, so a successor turn
++      // after the terminal would be visible as a second `started`.
++      const observed: string[] = []
++      const waiting = yield* Deferred.make<void>()
++      yield* bus.listen((event) =>
++        Effect.suspend(() => {
++          const data = event.data as { sessionID?: string; status?: { type?: string } }
++          if (data.sessionID !== parent) return Effect.void
++          if (
++            event.type !== SessionEvent.Execution.Started.type &&
++            event.type !== SessionEvent.Execution.Succeeded.type &&
++            event.type !== SessionEvent.Execution.Interrupted.type &&
++            event.type !== SessionEvent.Execution.Failed.type &&
++            event.type !== SessionStatusEvent.Status.type
++          )
++            return Effect.void
++          observed.push(event.type)
++          if (event.type === SessionStatusEvent.Status.type && data.status?.type === "waiting")
++            return Deferred.succeed(waiting, undefined).pipe(Effect.asVoid)
++          return Effect.void
++        }),
++      )
++
++      const scope = yield* Scope.make()
++      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
++      const context = yield* buildExecution(scope, () => Effect.void)
++      const execution = Context.get(context, SessionExecution.Service)
++      const sessions = Context.get(context, Session.Service)
++      yield* execution.resume(parent).pipe(Effect.forkScoped)
++      yield* Deferred.await(waiting)
++      yield* execution.awaitIdle(parent)
++
++      // The parent turn settled with the child's durable marker outstanding: parked in
++      // `waiting`, claim held, no active execution.
++      expect(observed).toEqual([SessionEvent.Execution.Started.type, SessionStatusEvent.Status.type])
++      expect((yield* claims(database))[parent]).toBe(true)
++      expect(yield* jobs.awaiting(parent)).toBe(true)
++      expect(yield* execution.isActive(parent)).toBe(false)
++
++      // Cancellation admission: the child's notice is admitted without resuming the parent,
++      // and acknowledging the marker leaves the parked turn with no other owner of its terminal.
++      yield* jobs.cancel(child)
++      yield* SubagentCompletion.deliver(sessions, jobs, {
++        status: "cancelled",
++        notificationID: marker.notificationID,
++        recovery,
++      })
++      yield* Effect.yieldNow
++
++      expect(observed).toEqual([
++        SessionEvent.Execution.Started.type,
++        SessionStatusEvent.Status.type,
++        SessionEvent.Execution.Interrupted.type,
++      ])
++      expect(yield* jobs.awaiting(parent)).toBe(false)
++      expect((yield* claims(database))[parent]).toBe(false)
++      expect(yield* execution.isActive(parent)).toBe(false)
++      // Settlement must not start a turn: no `started` after the single terminal.
++      expect(observed.filter((type) => type === SessionEvent.Execution.Started.type)).toHaveLength(1)
++      expect(observed).not.toContain(SessionEvent.Execution.Succeeded.type)
++      expect(observed).not.toContain(SessionEvent.Execution.Failed.type)
++    }),
++  )
++
++  it.effect("settles a waiting Session with no pending markers on a background-cancelling interrupt", () =>
++    Effect.gen(function* () {
++      const database = yield* Database.Service
++      const bus = yield* Bus.Service
++      const jobs = yield* Job.Service
++      const sessionID = Session.ID.make("ses_interrupt_waiting_no_markers")
++      yield* seedSessions(database, [sessionID])
++
++      const shell = yield* jobs.start({
++        id: "sh_interrupt_waiting_no_markers",
++        type: "shell",
++        title: "sleep",
++        recovery: {
++          kind: "shell",
++          sessionID,
++          shellID: "sh_interrupt_waiting_no_markers",
++          command: "sleep",
++        },
++        run: Effect.never,
++      })
++      const marker = yield* jobs.background(shell.id)
++      if (!marker?.notificationID) return yield* Effect.die("expected background marker")
++
++      const observed: string[] = []
++      const waiting = yield* Deferred.make<void>()
++      yield* bus.listen((event) =>
++        Effect.suspend(() => {
++          const data = event.data as { sessionID?: string; status?: { type?: string } }
++          if (data.sessionID !== sessionID) return Effect.void
++          if (
++            event.type !== SessionEvent.Execution.Interrupted.type &&
++            event.type !== SessionStatusEvent.Status.type
++          )
++            return Effect.void
++          observed.push(event.type)
++          if (event.type === SessionStatusEvent.Status.type && data.status?.type === "waiting")
++            return Deferred.succeed(waiting, undefined).pipe(Effect.asVoid)
++          return Effect.void
++        }),
++      )
++
++      const scope = yield* Scope.make()
++      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
++      const context = yield* buildExecution(scope, () => Effect.void)
++      const execution = Context.get(context, SessionExecution.Service)
++      yield* execution.resume(sessionID).pipe(Effect.forkScoped)
++      yield* Deferred.await(waiting)
++      yield* execution.awaitIdle(sessionID)
++
++      // Clear the last marker without publishing anything, as a non-resuming notice would.
++      yield* jobs.completeBackground(marker.notificationID)
++      expect(yield* jobs.awaiting(sessionID)).toBe(false)
++      expect((yield* claims(database))[sessionID]).toBe(true)
++      expect(yield* execution.isActive(sessionID)).toBe(false)
++
++      // A plain interrupt stays a foreground-only no-op for a parked Session.
++      expect(yield* execution.interrupt(sessionID)).toBeFalse()
++      expect(observed).toEqual([SessionStatusEvent.Status.type])
++
++      // The background-cancelling interrupt has no markers left to cancel, but must still
++      // publish the parked turn's missing terminal and release its claim.
++      expect(yield* execution.interrupt(sessionID, { cancelBackground: true })).toBeTrue()
++      expect(observed).toEqual([SessionStatusEvent.Status.type, SessionEvent.Execution.Interrupted.type])
++      expect((yield* claims(database))[sessionID]).toBe(false)
++      expect(yield* execution.isActive(sessionID)).toBe(false)
++    }),
++  )
++
+   it.effect("interrupts a running turn but leaves background work by default", () =>
+     Effect.gen(function* () {
+       const database = yield* Database.Service
+@@ -1599,6 +1790,9 @@ function buildExecution(
+             sessions
+               .synthetic({ ...input, resume: false })
+               .pipe(Effect.tap(() => (input.resume === false ? Effect.void : execution.wake(input.sessionID)))),
++          // Route settlement at the execution instance this harness owns, mirroring the
++          // production Session layer, rather than the outer harness's instance.
++          settleWaitingIfIdle: execution.settleWaitingIfIdle,
+         })
+       }),
+     )
+diff --git a/packages/core/test/session-owned.test.ts b/packages/core/test/session-owned.test.ts
+index 327071b..4e4a2a5 100644
+--- a/packages/core/test/session-owned.test.ts
++++ b/packages/core/test/session-owned.test.ts
+@@ -105,6 +105,7 @@ const setup = Effect.fnUntraced(function* (options?: {
+       }),
+     awaitIdle: () => Effect.void,
+     interrupt: () => Effect.succeed(false),
++    settleWaitingIfIdle: () => Effect.succeed(false),
+     wake: (id) =>
+       Effect.gen(function* () {
+         const pending = yield* SessionInbox.list(database.db, id)
+@@ -636,6 +637,7 @@ describe("Session-owned handles", () => {
+             }),
+           wake: coordinator.wake,
+           awaitIdle: coordinator.awaitIdle,
++          settleWaitingIfIdle: () => Effect.succeed(false),
+           interrupt: (id, options) =>
+             Effect.sync(() => void interrupts.push({ sessionID: id, options })).pipe(
+               Effect.andThen(coordinator.interrupt(id)),
+diff --git a/packages/core/test/session-prompt.test.ts b/packages/core/test/session-prompt.test.ts
+index d6a2018..07c5b4b 100644
+--- a/packages/core/test/session-prompt.test.ts
++++ b/packages/core/test/session-prompt.test.ts
+@@ -59,6 +59,7 @@ const execution = Layer.succeed(
+       Effect.sync(() => {
+         wakeCalls.push(sessionID)
+       }),
++    settleWaitingIfIdle: () => Effect.succeed(false),
+     awaitIdle: () => Effect.void,
+   }),
+ )
+diff --git a/packages/core/test/session-remove.test.ts b/packages/core/test/session-remove.test.ts
+index c609d7a..d664dba 100644
+--- a/packages/core/test/session-remove.test.ts
++++ b/packages/core/test/session-remove.test.ts
+@@ -37,6 +37,7 @@ const recordingExecution = Layer.succeed(
+         interrupts.push({ sessionID, options })
+         return false
+       }),
++    settleWaitingIfIdle: () => Effect.succeed(false),
+     awaitIdle: () => Effect.void,
+   }),
+ )
+diff --git a/packages/core/test/session-runner-recorded.test.ts b/packages/core/test/session-runner-recorded.test.ts
+index dd39069..db41bdb 100644
+--- a/packages/core/test/session-runner-recorded.test.ts
++++ b/packages/core/test/session-runner-recorded.test.ts
+@@ -123,6 +123,7 @@ const execution = (llmClient: Layer.Layer<LLMClientService>) =>
+         resume: coordinator.run,
+         wake: coordinator.wake,
+         interrupt: (sessionID) => coordinator.interrupt(sessionID),
++        settleWaitingIfIdle: () => Effect.succeed(false),
+         awaitIdle: coordinator.awaitIdle,
+       })
+     }),
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+index 3dfbe54..2b96eaf 100644
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -455,6 +455,7 @@ const layer = Layer.unwrap(
+           resume: coordinator.run,
+           wake: coordinator.wake,
+           interrupt: (sessionID) => coordinator.interrupt(sessionID),
++          settleWaitingIfIdle: () => Effect.succeed(false),
+           awaitIdle: coordinator.awaitIdle,
+         })
+       }),
+diff --git a/packages/core/test/session-shell.test.ts b/packages/core/test/session-shell.test.ts
+index 35c7248..88ebb3e 100644
+--- a/packages/core/test/session-shell.test.ts
++++ b/packages/core/test/session-shell.test.ts
+@@ -49,6 +49,7 @@ const executionLayer = Layer.effect(
+       isActive: coordinator.isActive,
+       resume: coordinator.run,
+       interrupt: (sessionID) => coordinator.interrupt(sessionID),
++      settleWaitingIfIdle: () => Effect.succeed(false),
+       awaitIdle: coordinator.awaitIdle,
+       wake: (sessionID) =>
+         Effect.sync(() => control.wakes.push(sessionID)).pipe(Effect.andThen(coordinator.wake(sessionID))),
+diff --git a/packages/core/test/subagent-lifetime.test.ts b/packages/core/test/subagent-lifetime.test.ts
+index 338fc31..beb709d 100644
+--- a/packages/core/test/subagent-lifetime.test.ts
++++ b/packages/core/test/subagent-lifetime.test.ts
+@@ -124,11 +124,26 @@ describe("subagent observer lifetime", () => {
+           if (outcome === "cancelled") yield* jobs.cancel(child.id)
+           yield* gate.release
+           yield* jobs.wait({ id: child.id })
+-          yield* llm.wait(2).pipe(Effect.timeout("2 seconds"))
++          // A cancelled notice does not resume the child, so the parent never makes a second request.
++          yield* llm.wait(outcome === "cancelled" ? 1 : 2).pipe(Effect.timeout("2 seconds"))
+           yield* sessions.wait(parent.id)
+           const notices = (yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")
+-          expect(notices).toHaveLength(1)
+-          expect(notices[0]).toMatchObject({ metadata: { source: "subagent", childID: child.id, state: outcome } })
++          if (outcome === "cancelled") {
++            // The cancelled notice is admitted for context but does not wake the idle parent, so
++            // it stays pending in the inbox instead of being delivered into the transcript.
++            expect(notices).toEqual([])
++            expect(yield* sessions.inbox(parent.id)).toMatchObject([
++              {
++                type: "synthetic",
++                payload: {
++                  metadata: { source: "subagent", childID: child.id, state: "cancelled" },
++                },
++              },
++            ])
++          } else {
++            expect(notices).toHaveLength(1)
++            expect(notices[0]).toMatchObject({ metadata: { source: "subagent", childID: child.id, state: outcome } })
++          }
+           expect(yield* jobs.pendingBackground).toEqual([])
+           yield* locations.invalidate(parent.location)
+           yield* Plugin.Service.use((plugins) => plugins.awaitActivation).pipe(
+@@ -137,7 +152,8 @@ describe("subagent observer lifetime", () => {
+           expect((yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")).toEqual(
+             notices,
+           )
+-          expect(yield* llm.requests()).toHaveLength(2)
++          // A cancelled child is never resumed by its notice, so only its own request ran.
++          expect(yield* llm.requests()).toHaveLength(outcome === "cancelled" ? 1 : 2)
+         }),
+       20_000,
+     )
+diff --git a/packages/core/test/tool-shell.test.ts b/packages/core/test/tool-shell.test.ts
+index f0fbf57..3cb6762 100644
+--- a/packages/core/test/tool-shell.test.ts
++++ b/packages/core/test/tool-shell.test.ts
+@@ -3,7 +3,7 @@ import { realpathSync, watch } from "node:fs"
+ import os from "os"
+ import path from "path"
+ import { describe, expect } from "bun:test"
+-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Queue, Scope, Stream } from "effect"
++import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Queue, Schedule, Scope, Stream } from "effect"
+ import { Money } from "@opencode/schema/money"
+ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode/util/effect/layer-node"
+@@ -49,6 +49,10 @@ import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "
+ const sessionID = Session.ID.make("ses_shell_tool_test")
+ const sessionModel = Model.Ref.make({ id: Model.ID.make("test"), providerID: Provider.ID.make("test") })
+ const assertions: Permission.AssertInput[] = []
++// Owners a synthetic admission resumed, recorded by the harness execution layer below.
++const wakes: Session.ID[] = []
++// Owners a non-resuming notice asked to settle, recorded by the harness execution layer below.
++const settles: Session.ID[] = []
+ let denyAction: string | undefined
+ let afterPermission = (_input: Permission.AssertInput): Effect.Effect<void> => Effect.void
+ 
+@@ -72,6 +76,8 @@ const permission = permissionLayer({
+ 
+ const reset = () => {
+   assertions.length = 0
++  wakes.length = 0
++  settles.length = 0
+   denyAction = undefined
+   afterPermission = () => Effect.void
+ }
+@@ -117,8 +123,13 @@ const executionNode = makeGlobalNode({
+         active: Effect.succeed(new Set()),
+         isActive: () => Effect.succeed(false),
+         resume: complete,
+-        wake: () => Effect.void,
++        wake: (id) => Effect.sync(() => void wakes.push(id)),
+         interrupt: () => Effect.succeed(false),
++        settleWaitingIfIdle: (id) =>
++          Effect.sync(() => {
++            settles.push(id)
++            return false
++          }),
+         awaitIdle: (id) => complete(id).pipe(Effect.exit, Effect.asVoid),
+       })
+     }),
+@@ -1861,4 +1872,80 @@ describe("ShellTool", () => {
+       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+     ),
+   )
++
++  it.live("does not wake the owner when a background shell is cancelled", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => {
++        reset()
++        return withSession(tmp.path, (registry) =>
++          Effect.gen(function* () {
++            const bus = yield* Bus.Service
++            const jobs = yield* Job.Service
++            const admitted = yield* bus.subscribe(SessionEvent.InboxEnqueued).pipe(
++              Stream.filter((event) => event.data.sessionID === sessionID && event.data.item.type === "synthetic"),
++              Stream.runHead,
++              Effect.forkScoped({ startImmediately: true }),
++            )
++            const settled = yield* executeTool(
++              registry,
++              call({ command: idleCommand, background: true }, "call-background-cancelled"),
++            )
++            const shellID = settled.metadata?.shellID
++            expect(typeof shellID).toBe("string")
++            if (typeof shellID !== "string") return
++            yield* jobs.cancel(shellID)
++
++            // The cancellation notice is still admitted, but it must not revive the owner.
++            const item = (yield* Fiber.join(admitted)).valueOrUndefined?.data.item
++            expect(item?.payload).toMatchObject({
++              text: expect.stringContaining("Cancelled"),
++              metadata: { source: "shell", shellID, state: "cancelled" },
++            })
++            // Give any (incorrect) wake admitted just after the inbox event time to surface.
++            yield* Effect.sleep("100 millis")
++            expect(wakes).toEqual([])
++            // The cancelled notice clears the owner's last marker, so the shell must ask the
++            // execution layer to settle a parked owner (which separately terminals it).
++            expect(settles).toEqual([sessionID])
++          }),
++        )
++      },
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
++    ),
++  )
++
++  it.live("still wakes the owner when a background shell completes", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => {
++        reset()
++        return withSession(tmp.path, (registry) =>
++          Effect.gen(function* () {
++            const bus = yield* Bus.Service
++            const admitted = yield* bus.subscribe(SessionEvent.InboxEnqueued).pipe(
++              Stream.filter((event) => event.data.sessionID === sessionID && event.data.item.type === "synthetic"),
++              Stream.runHead,
++              Effect.forkScoped({ startImmediately: true }),
++            )
++            const settled = yield* executeTool(
++              registry,
++              call({ command: helloCommand, background: true }, "call-background-completed"),
++            )
++            const shellID = settled.metadata?.shellID
++            expect(typeof shellID).toBe("string")
++            const item = (yield* Fiber.join(admitted)).valueOrUndefined?.data.item
++            expect(item?.payload).toMatchObject({ metadata: { source: "shell", shellID, state: "completed" } })
++            // The wake is admitted immediately after the inbox event; wait for it deterministically.
++            yield* Effect.repeat(
++              Effect.sync(() => wakes.includes(sessionID)),
++              { until: (found) => found, schedule: Schedule.spaced("10 millis") },
++            ).pipe(Effect.timeout("2 seconds"))
++            expect(wakes).toContain(sessionID)
++          }),
++        )
++      },
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
++    ),
++  )
+ })
+diff --git a/packages/core/test/tool-subagent.test.ts b/packages/core/test/tool-subagent.test.ts
+index 46f7df1..e1e635c 100644
+--- a/packages/core/test/tool-subagent.test.ts
++++ b/packages/core/test/tool-subagent.test.ts
+@@ -105,6 +105,7 @@ const executionNode = makeGlobalNode({
+         resume: complete,
+         wake: () => Effect.void,
+         interrupt: () => Effect.succeed(false),
++        settleWaitingIfIdle: () => Effect.succeed(false),
+         awaitIdle: (sessionID) => complete(sessionID).pipe(Effect.exit, Effect.asVoid),
+       })
+     }),
+diff --git a/packages/server/test/session-diff.test.ts b/packages/server/test/session-diff.test.ts
+index bafcfa0..3954766 100644
+--- a/packages/server/test/session-diff.test.ts
++++ b/packages/server/test/session-diff.test.ts
+@@ -48,6 +48,7 @@ it.live("serves turn diffs by user message with range validation", () =>
+               })
+             }),
+           interrupt: () => Effect.succeed(false),
++          settleWaitingIfIdle: () => Effect.succeed(false),
+           awaitIdle: () => Effect.void,
+         })
+       }),
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 5941780..f82e6ca 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -1120,7 +1120,7 @@ export function Session(props: {
+           if (pendingDeliveries().has(message.id)) {
+             if (!(await mutatePending("cancel", message.id))) return
+           } else {
+-            await client.api.session.interrupt({ sessionID })
++            await client.api.session.interrupt({ sessionID, cancelBackground: true })
+             await client.api.session.wait({ sessionID })
+             await client.api.session.revert.stage({ sessionID, messageID: message.id })
+           }

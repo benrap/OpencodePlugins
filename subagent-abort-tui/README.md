@@ -80,11 +80,11 @@ The default shortcut is configurable like any named command:
 - **Order.** Interrupts run descendants-first (reverse breadth-first), so the
   viewed session is aborted last.
 - The interrupt sends `{ sessionID, resume: false, cancelBackground: true }`.
-  `cancelBackground` is a new `session.interrupt` field (core patch **`0005`**)
+  `cancelBackground` is a new `session.interrupt` field (core patch **`0004`**)
   that also cancels the session's outstanding durable background jobs, so a
   session parked in `waiting` actually stops. It is passed even though the
   plugin's bundled type definitions may not list the field yet.
-- **No revival after abort.** Core patch **`0006`** makes a cancelled job's
+- **No revival after abort.** Core patch **`0005`** makes a cancelled job's
   notice non-reviving (`resume: false` when `status === "cancelled"`), so
   cancelling the subtree's background work cannot wake the aborted sessions back
   into a new turn. Normal `succeeded`/`failed`/`error` completions still resume

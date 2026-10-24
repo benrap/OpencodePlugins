@@ -46,7 +46,7 @@ function viewedChildId(context: Context): string | null {
  *
  * `list` is called exactly like `subagent-sidebar-tree`'s `syncChildren`
  * (`session.list({ parentID, order: "desc" })`). `cancelBackground` is a NEW
- * `session.interrupt` field (core patch `0005`) that the plugin's bundled type
+ * `session.interrupt` field (core patch `0004`) that the plugin's bundled type
  * definitions may not list yet — the host supports it — so the client is cast
  * rather than fought with types.
  */

@@ -13,7 +13,7 @@ sourced from this repo.
 | [`keep-awake`](./keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
 | [`prefill`](./prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
 | [`always-background`](./always-background) | server | Forces background execution for every tool call **except** `shell` and `subagent` via the `execute.before` hook; the exclude list is configurable. |
-| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build (upstream v2.0.27 base) from source (sidebar `parentID` gate removal, waiting/tick fix, abort of a waiting session, a foreground-only interrupt, a child-session inline steer composer, and non-reviving cancellation so abort does not restart the subagent), with a canonical combined patch (`v2.0.27.patch`) plus the per-fix patches (`0001`–`0006`), and switch/revert scripts. |
+| [`patched-opencode`](./patched-opencode) | tooling | Reversible shim that makes `opencode` launch a patched build on an upstream v2.1.4 base (sidebar `parentID` gate removal, waiting/tick fix, child-session inline steer composer, foreground-only interrupt via `cancelBackground`, non-reviving cancellation so abort does not restart the subagent, and parked-`waiting` settlement so an aborted owner returns to idle), with a canonical combined patch (`patches/v2.1.4.patch`) plus the five per-fix patches (`0001`–`0005`, including `0004-cancel-background-interrupt` and `0005-abort-does-not-resume`), and switch/revert scripts. |
 | [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `subagent-status`, `subagent-abort`, `message_agent`, `question`, and `skill` tools are allowed, everything else denied. |
 
 ## Installation instructions (for AI agents)
@@ -86,18 +86,19 @@ Copy-Item -Force .\agents\forced-orchestrator.md "$env:USERPROFILE\.config\openc
 
 ### 4. Install the patched-openCode shim (optional)
 
-`patched-opencode/` makes the `opencode` command resolve to a patched build run
-from source, without touching the stock installation. Apply it with:
+`patched-opencode/` makes the `opencode` command resolve to the patched build
+(standalone binary first, with a source fallback), without touching the stock
+installation. Apply it with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\patched-opencode\scripts\switch-patched.ps1
 ```
 
-Open a **new** shell and verify (`opencode --version` prints `opencode vlocal`).
+Open a **new** shell and verify (`opencode --version` prints `opencode v2.1.4-patched`).
 Revert with `scripts\revert-patched.ps1`; fresh installs can create the shim dir
 with `scripts\install-shim.ps1`. See
 [`patched-opencode/README.md`](./patched-opencode/README.md) for the patch
-contents, source location, and optional compiled-binary build.
+contents, install details, and the optional build-from-source recipe.
 
 ### 5. Run the tests
 
@@ -149,7 +150,7 @@ node keep-awake/test/keep-awake.test.mjs
 - `subagent-status` defaults to `summary` mode (state + a 2-4 sentence LLM summary). Pass `mode: "state"` for a cheap status check (`running`/`idle`/`waiting`/`finished`) with no LLM call.
 - `always-background` forces `background: true` on every tool call except those in its `exclude` list (default `["shell", "subagent"]`, which keep their own user-controlled `background` input).
 - `keep-awake` keeps the machine awake but lets the display sleep (`keepDisplayOn`/`mode: "display"` to keep it on).
-- `patched-opencode` is a PATH shim, not a plugin: it launches the patched source via `bun run`, so source edits are picked up on the next invocation with no rebuild. Its patch set — canonical combined `v2.0.27.patch` on an upstream v2.0.27 base, with the per-fix `0001`–`0006` breakdown — adds the waiting/tick fix, removes the subagent sidebar gate, adds the child inline steer composer, makes `/abort` actually stop a subagent stuck in `waiting`, (`0005`) makes a default interrupt foreground-only (`Esc Esc` stops only the foreground turn and leaves background tasks alone; `cancelBackground: true` restores the full stop), and (`0006`) makes a cancelled job's notice non-reviving so aborting a subagent terminates it cleanly instead of restarting it.
+- `patched-opencode` is a PATH shim, not a plugin: it launches the patched build (standalone binary first, with a `bun run` source fallback). Its patch set — canonical combined `patches/v2.1.4.patch` on an upstream v2.1.4 base, with the per-fix `0001`–`0005` breakdown (`0001` sidebar-gate removal, `0002` waiting-status/tick fix, `0003` child inline steer composer, `0004` `cancelBackground` / foreground-only interrupt, `0005` non-reviving cancellation and parked-owner settlement) — adds the waiting/tick fix, removes the subagent sidebar gate, adds the child inline steer composer, makes a default interrupt foreground-only (`Esc Esc` stops only the foreground turn and leaves background tasks alone; `cancelBackground: true` restores the full stop and is used by `Session.remove` and the revert/teardown paths), and makes a cancelled job's notice non-reviving so aborting a subagent terminates it cleanly instead of restarting it. When that cancellation clears a waiting owner's last background marker, `settleWaitingIfIdle` publishes its interrupted terminal and releases the claim, so the owner returns to idle instead of staying stuck in `waiting`. Upstream v2.1.4 redesigned its inactivity reaper (PR #57416) so it no longer interrupts sessions, so that old reaper hunk is intentionally not ported.
 
 ## License
 

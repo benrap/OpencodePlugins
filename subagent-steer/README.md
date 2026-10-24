@@ -5,6 +5,11 @@ child/subagent session you are currently viewing.
 
 ## The gap this fills
 
+> **Version note:** the stock-host analysis below was performed against OpenCode
+> v2.0.27 and was not re-audited for v2.1.4. On the patched v2.1.4 build
+> (`patched-opencode`), the host's inline child steer composer already provides
+> this capability, so this plugin is only needed on stock hosts.
+
 On **stock** OpenCode v2.0.27 the host **hides its own message prompt for child
 sessions**. In `packages/tui/src/routes/session/index.tsx` the composer is
 forced open for any session with a `parentID` and the normal `<Prompt>` is
