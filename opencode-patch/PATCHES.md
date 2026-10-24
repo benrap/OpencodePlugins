@@ -319,13 +319,43 @@ $env:OPENCODE_VERSION="2.1.4-patched"; $env:OPENCODE_CHANNEL="prod"
 bun --bun ./script/build.ts --target=opencode-windows-x64 --skip-install
 ```
 
+```bash
+cd packages/cli
+export OPENCODE_VERSION="2.1.4-patched" OPENCODE_CHANNEL="prod"
+bun --bun ./script/build.ts --target=opencode-linux-x64
+# => packages/cli/dist/cli-linux-x64/bin/opencode
+bun --bun ./script/build.ts --target=opencode-linux-arm64
+# => packages/cli/dist/cli-linux-arm64/bin/opencode
+```
+
 | Artifact | Size | SHA-256 |
 |---|---:|---|
 | `opencode.exe` | 246,889,984 B | `AF75E3FD0C3DD131C2C0E58EEEFFACB03A8AAE0F214987D5625D7536BF887D4F` |
 | `opencode-patched-windows-x64.zip` | 117,157,757 B | `53E667ACD5D5625ACDCF37B6CB5F418CF9412880B2E8760D4F40981B0F9C9E34` |
+| `opencode-patched-linux-x64.tar.gz` | 114,400,216 B | `00711962E783FCDEA7803A76B7422EF2CB7A14AD87339405501F7A42D2513974` |
+| `opencode-patched-linux-arm64.tar.gz` | 113,093,527 B | `A0D78313696FCE0A13078E4E0E1F8CB4E5C775A70E11B09D07E4F1FA569C4367` |
 
-The zip contains exactly one root entry, `opencode.exe` (246,889,984 B).
-`opencode.exe --version` prints `opencode v2.1.4-patched`; `--help` exits 0.
+The zip contains exactly one root entry, `opencode.exe` (246,889,984 B). Each
+Linux tarball also contains exactly one entry, `opencode` (`-rwxr-xr-x`, mode
+755, preserved by GNU tar): 240,408,752 B on x64 and 236,112,888 B on arm64.
+`opencode.exe --version` prints `opencode v2.1.4-patched` and `--help` exits 0;
+the Linux x64 binary prints `opencode v2.1.4-patched` and `--help` exits 0 when
+run on Ubuntu 24.04. The Linux arm64 binary is cross-compiled on x86_64 and was
+verified statically only (ELF `e_machine` `0xB7`, the four patch markers and
+the `2.1.4-patched` version constant present) — it was not executed on this
+host.
+
+**Runtime verification (Linux x64, Ubuntu 24.04 LTS / glibc 2.39, WSL).** The
+extracted binary reports `opencode v2.1.4-patched` for `--version` (exit 0) and
+`--help` exits 0. `serve --port 4099` came up and was reachable: `GET /api/info`
+requires HTTP Basic auth (user `opencode`, password printed in the serve log);
+with credentials it returned `200` and JSON `{"version":"2.1.4-patched",...}`,
+while unauthenticated requests returned `401` `application/json`
+`{"_tag":"UnauthorizedError","message":"Authentication required"}`.
+`GET /health` returned `200` with `text/html` (the SPA fallback on this build,
+not JSON), with or without auth. The arm64 tarball is cross-compiled: its ELF
+header (`e_machine` `0xB7`) and the four patch markers / `2.1.4-patched`
+version constant were checked, but no arm64 runtime execution was performed.
 
 **Focused tests (Windows, bun 1.4.4).**
 
@@ -376,6 +406,9 @@ typecheck fails on file resolution. A temporary external tsconfig typechecks
 - The **`patched-v2.0.27`** and **`patched-v2.0.23`** releases remain available
   for rollback; they are built on the older v2.0.x base and are not
   patch-compatible with v2.1.4.
+- **Linux assets first ship with `patched-v2.1.4`** (`opencode-patched-linux-x64.tar.gz`
+  and `opencode-patched-linux-arm64.tar.gz`). The earlier `patched-v2.0.x`
+  releases are Windows-only.
 - In the v2.0.x set, what is now **0004** and **0005** were separate: the
   foreground-only `cancelBackground` interrupt and the waiting-session abort.
   They are merged into **0004** here.

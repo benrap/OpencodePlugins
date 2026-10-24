@@ -18,7 +18,7 @@ housekeeping.
 | [`keep-awake`](./plugins/keep-awake) | server | Keeps a Windows machine awake (display may power off) while any session/agent is busy. Windows-only. |
 | [`prefill`](./plugins/prefill) | server | Per-message opt-in message injection (assistant prefill / steering) via a trailing `#prefill` marker stripped before persistence. |
 | [`always-background`](./plugins/always-background) | server | Forces background execution for every tool call **except** `shell` and `subagent` via the `execute.before` hook; the exclude list is configurable. |
-| [`opencode-patch`](./opencode-patch) | tooling | Reversible shim that makes `opencode` launch a patched build on an upstream v2.1.4 base (sidebar `parentID` gate removal, waiting/tick fix, child-session inline steer composer, foreground-only interrupt via `cancelBackground`, non-reviving cancellation so abort does not restart the subagent, and parked-`waiting` settlement so an aborted owner returns to idle), with a canonical combined patch (`patches/v2.1.4.patch`) plus the five per-fix patches (`0001`–`0005`, including `0004-cancel-background-interrupt` and `0005-abort-does-not-resume`), and switch/revert scripts. |
+| [`opencode-patch`](./opencode-patch) | tooling | Reversible shim that makes `opencode` launch a patched build on an upstream v2.1.4 base (sidebar `parentID` gate removal, waiting/tick fix, child-session inline steer composer, foreground-only interrupt via `cancelBackground`, non-reviving cancellation so abort does not restart the subagent, and parked-`waiting` settlement so an aborted owner returns to idle), shipped as prebuilt **Windows x64** and **Linux x64/arm64** binaries, with a canonical combined patch (`patches/v2.1.4.patch`) plus the five per-fix patches (`0001`–`0005`, including `0004-cancel-background-interrupt` and `0005-abort-does-not-resume`), and switch/revert scripts. |
 | [`agents/forced-orchestrator.md`](./agents/forced-orchestrator.md) | agent | Nested-delegation orchestrator; only the `subagent`, `subagent-status`, `subagent-abort`, `message_agent`, `question`, and `skill` tools are allowed, everything else denied. |
 
 ## Installation instructions (for AI agents)
@@ -104,6 +104,12 @@ Revert with `.\opencode-patch\scripts\revert-patched.ps1`; fresh installs can
 create the shim dir with `.\opencode-patch\scripts\install-shim.ps1`. See
 [`opencode-patch/README.md`](./opencode-patch/README.md) for the patch
 contents, install details, and the optional build-from-source recipe.
+
+The shim scripts above are **Windows-only**. On Linux, download the `patched-v2.1.4`
+`opencode-patched-linux-x64.tar.gz` or `opencode-patched-linux-arm64.tar.gz`
+asset, extract it, and put the `opencode` binary on your `PATH` — see
+[`opencode-patch/README.md`](./opencode-patch/README.md#download--run-windows-x64-linux-x64-linux-arm64)
+for the URLs, checksums, and steps.
 
 ### 5. Run the tests
 
