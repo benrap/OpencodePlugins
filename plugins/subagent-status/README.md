@@ -16,10 +16,11 @@ It supports three modes:
   of what the subagent is doing, its status, key findings, blockers, and the
   likely next step.
 - **`all`** — Returns the NAME and STATE of every ACTIVE subagent (state is
-  exactly `running` or `waiting`). It needs **no `sessionID`** and makes **no
-  LLM call**. The inventory comes from the host event stream, scoped
-  process-wide; root/primary sessions (which have no parent) are excluded, as
-  are finished/idle sessions.
+  exactly `running` or `waiting`) in the CALLING session's descendant subtree.
+  It needs **no `sessionID`** and makes **no LLM call**. The inventory comes
+  from the host event stream, scoped to that subtree; sibling root sessions are
+  excluded, as are the caller itself, root/primary sessions (which have no
+  parent), and finished/idle sessions.
 
 ## Usage
 
@@ -33,7 +34,8 @@ const { output } = await tools.subagent-status.summary({ sessionID: "ses_xxx" })
 // output.state === "running" | ...
 // output.summary === "The subagent is currently..."
 
-// List every active (running/waiting) subagent — no sessionID needed
+// List every active (running/waiting) subagent in this session's subtree —
+// no sessionID needed
 const { output } = await tools.subagent-status.all({});
 // output.subagents === [{ name: "explore", state: "running", sessionID: "ses_yyy" }, ...]
 // output.count === 2
@@ -61,8 +63,9 @@ const { output } = await tools.subagent-status.all({});
 
 In `all` mode an empty result returns `{ subagents: [], count: 0 }` (and the
 content `No active subagents.`). The list is populated from the host event
-stream and is scoped process-wide; only subagents with a parent whose state is
-`running` or `waiting` are included.
+stream and is scoped to the calling session's descendant subtree; only
+descendants whose state is `running` or `waiting` are included. If the caller
+id cannot be determined, the result is empty rather than process-wide.
 
 ## Install
 

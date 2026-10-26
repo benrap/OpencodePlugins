@@ -51,13 +51,14 @@
  * Fail-safe: a plugin error must never break host startup, so `setup` is fully
  * wrapped and becomes a clean no-op when the expected context is unavailable.
  *
- * The `all` mode enumerates ACTIVE subagents from a process-wide, event-fed
- * registry (see `./subagent-registry.js`): OpenCode v2.0.6 exposes no
- * `ctx.session.list`, so the inventory is folded from `ctx.event.subscribe`.
+ * The `all` mode enumerates ACTIVE subagents from an event-fed registry (see
+ * `./subagent-registry.js`), scoped to the calling session's descendant
+ * subtree: OpenCode v2.0.6 exposes no `ctx.session.list`, so the inventory is
+ * folded from `ctx.event.subscribe`.
  */
 
 import {
-  activeSubagentSessions,
+  activeDescendantSessions,
   globalRegistry,
   resolveName,
   sessionState,
@@ -75,7 +76,8 @@ const TOOL_DESCRIPTION =
   'returned when it was spawned). Set mode to "state" for a lightweight ' +
   'status check (running/idle/waiting/finished) without an LLM call. Set mode ' +
   'to "all" to list the name and state of every active (running/waiting) ' +
-  'subagent; "all" needs no sessionID and makes no LLM call.';
+  'subagent in the caller\'s descendant tree; "all" needs no sessionID and ' +
+  'makes no LLM call.';
 
 const INPUT_SCHEMA = {
   type: 'object',
@@ -104,7 +106,8 @@ const INPUT_SCHEMA = {
         '"state" (default) returns only the session state ' +
         '(running/idle/waiting/finished) without an LLM call. "summary" also ' +
         'generates an LLM summary. "all" returns the name and state of every ' +
-        'active (running/waiting) subagent and needs no sessionID.',
+        'active (running/waiting) subagent in the caller\'s descendant tree and ' +
+        'needs no sessionID.',
     },
   },
   additionalProperties: false,
@@ -500,6 +503,13 @@ async function determineState(ctx, sessionID, messages) {
 // Tool definition.
 // ---------------------------------------------------------------------------
 
+/** The calling session id supplied by the host tool context, if any. */
+function callerSessionID(toolContext) {
+  if (!toolContext || typeof toolContext !== 'object') return undefined;
+  const value = toolContext.sessionID;
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
 function makeTool(ctx, registry = globalRegistry()) {
   return {
     name: TOOL_NAME,
@@ -507,14 +517,15 @@ function makeTool(ctx, registry = globalRegistry()) {
     options: { codemode: false },
     input: INPUT_SCHEMA,
     output: OUTPUT_SCHEMA,
-    execute: async (input) => {
+    execute: async (input, toolContext) => {
       const args = input && typeof input === 'object' ? input : {};
       const sessionID = typeof args.sessionID === 'string' ? args.sessionID.trim() : '';
       const mode = args.mode === 'summary' ? 'summary' : args.mode === 'all' ? 'all' : 'state';
 
       if (mode === 'all') {
         try {
-          const records = activeSubagentSessions(registry);
+          const caller = callerSessionID(toolContext);
+          const records = caller ? activeDescendantSessions(registry, caller) : [];
           const subagents = records.map((record) => ({
             name: resolveName(record),
             state: sessionState(record),
@@ -623,6 +634,7 @@ function setup(ctx) {
 
 export { TOOL_NAME, makeTool };
 export {
+  activeDescendantSessions,
   activeSubagentSessions,
   createRegistry,
   globalRegistry,

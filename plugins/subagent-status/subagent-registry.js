@@ -239,6 +239,19 @@ export function isActiveSubagent(record) {
 }
 
 /**
+ * Stable display order for active records: `time.updated` DESC, ties broken by
+ * id ascending. Shared by the global and caller-scoped inventories.
+ */
+function compareActiveSubagentRecords(a, b) {
+  const aTime = a && a.time && typeof a.time.updated === 'number' ? a.time.updated : 0;
+  const bTime = b && b.time && typeof b.time.updated === 'number' ? b.time.updated : 0;
+  if (bTime !== aTime) return bTime - aTime;
+  const aID = typeof a.id === 'string' ? a.id : '';
+  const bID = typeof b.id === 'string' ? b.id : '';
+  return aID < bID ? -1 : aID > bID ? 1 : 0;
+}
+
+/**
  * All active subagent records, sorted by `time.updated` DESC (ties broken by
  * id ascending). Total — never throws.
  *
@@ -255,14 +268,57 @@ export function activeSubagentSessions(registry) {
   } catch {
     return out;
   }
-  out.sort((a, b) => {
-    const aTime = a && a.time && typeof a.time.updated === 'number' ? a.time.updated : 0;
-    const bTime = b && b.time && typeof b.time.updated === 'number' ? b.time.updated : 0;
-    if (bTime !== aTime) return bTime - aTime;
-    const aID = typeof a.id === 'string' ? a.id : '';
-    const bID = typeof b.id === 'string' ? b.id : '';
-    return aID < bID ? -1 : aID > bID ? 1 : 0;
-  });
+  out.sort(compareActiveSubagentRecords);
+  return out;
+}
+
+/**
+ * Active subagent records in the descendant subtree of `rootID`, walking
+ * `parentID` links breadth-first. The root itself, sibling roots, nearby
+ * sessions, and terminal/idle descendants are excluded. Cycle-safe and
+ * duplicate-safe; sorted exactly like {@link activeSubagentSessions}. Total —
+ * never throws.
+ *
+ * @param {Registry} registry
+ * @param {string} rootID
+ * @returns {SessionRecord[]}
+ */
+export function activeDescendantSessions(registry, rootID) {
+  if (!isRegistry(registry)) return [];
+  if (typeof rootID !== 'string') return [];
+  const root = rootID.trim();
+  if (!root) return [];
+
+  const out = [];
+  const children = new Map();
+  const seen = new Set([root]);
+
+  try {
+    for (const record of registry.sessions.values()) {
+      if (!record || typeof record !== 'object') continue;
+      const parentID = typeof record.parentID === 'string' ? record.parentID : '';
+      if (!parentID) continue;
+      const siblings = children.get(parentID);
+      if (siblings) siblings.push(record);
+      else children.set(parentID, [record]);
+    }
+
+    const pending = [...(children.get(root) ?? [])];
+    while (pending.length > 0) {
+      const record = pending.shift();
+      if (!record || typeof record !== 'object') continue;
+      const id = typeof record.id === 'string' ? record.id : '';
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      if (isActiveSubagent(record)) out.push(record);
+      const nested = children.get(id);
+      if (nested && nested.length > 0) pending.push(...nested);
+    }
+  } catch {
+    return out.sort(compareActiveSubagentRecords);
+  }
+
+  out.sort(compareActiveSubagentRecords);
   return out;
 }
 

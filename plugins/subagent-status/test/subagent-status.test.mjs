@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import {
+  descendantSessions,
+  isActiveSubagent as isActiveSidebarSubagent,
+} from "../../subagent-sidebar-tree/subagent-view.ts";
 
 // Resolve sibling plugin sources relative to this test file so the suite runs
 // against whichever checkout it lives in (repo, git worktree, or a copied live
@@ -93,7 +97,7 @@ function activeFixture() {
 
 await checkAsync('mode "all" returns exactly the active subagents, with names and states', async () => {
   const tool = makeTool({}, activeFixture());
-  const result = await tool.execute({ mode: "all" }, {});
+  const result = await tool.execute({ mode: "all" }, { sessionID: "root" });
 
   assert.equal(result.output.count, result.output.subagents.length);
   assert.equal(result.output.count, 2, "only the running + waiting children are active");
@@ -119,9 +123,166 @@ await checkAsync('mode "all" returns exactly the active subagents, with names an
 
 await checkAsync('mode "all" on an empty registry returns the empty shape', async () => {
   const tool = makeTool({}, createRegistry());
-  const result = await tool.execute({ mode: "all" }, {});
+  const result = await tool.execute({ mode: "all" }, { sessionID: "root" });
   assert.deepEqual(result.output, { subagents: [], count: 0 });
   assert.equal(result.content, "No active subagents.");
+});
+
+function scopedFixture() {
+  const registry = createRegistry();
+  const ids = {
+    rootA: "ses_A",
+    a1: "ses_A1",
+    a2: "ses_A2",
+    a1x: "ses_A1X",
+    aDone: "ses_ADone",
+    aIdle: "ses_AIdle",
+    rootB: "ses_B",
+    b1: "ses_B1",
+    b1x: "ses_B1X",
+    bDone: "ses_BDone",
+    rootC: "ses_C",
+    c1: "ses_C1",
+    rootD: "ses_D",
+    dDone: "ses_DDone",
+  };
+  const created = (sessionID, parentID, title, updated) => ({
+    type: "session.created",
+    data: { sessionID, parentID, title, time: { updated } },
+  });
+  const started = (sessionID, updated) => ({
+    type: "session.execution.started",
+    data: { sessionID, time: { updated } },
+  });
+  const succeeded = (sessionID, updated) => ({
+    type: "session.execution.succeeded",
+    data: { sessionID, time: { updated } },
+  });
+  const status = (sessionID, kind, updated) => ({
+    type: "session.status",
+    data: { sessionID, status: { type: kind }, time: { updated } },
+  });
+
+  const events = [
+    created(ids.rootA, undefined, "Root A", 100),
+    created(ids.a1, ids.rootA, "A1 running", 200),
+    // Duplicate create must not duplicate the descendant in `all`.
+    created(ids.a1, ids.rootA, "A1 running (duplicate event)", 250),
+    started(ids.a1, 260),
+    created(ids.a2, ids.rootA, "A2 waiting", 300),
+    status(ids.a2, "waiting", 310),
+    created(ids.a1x, ids.a1, "A1X nested running", 320),
+    started(ids.a1x, 330),
+    created(ids.aDone, ids.rootA, "A done", 400),
+    started(ids.aDone, 400),
+    succeeded(ids.aDone, 410),
+    created(ids.aIdle, ids.rootA, "A idle", 500),
+    status(ids.aIdle, "idle", 510),
+    created(ids.rootB, undefined, "Root B", 120),
+    created(ids.b1, ids.rootB, "B1 running", 210),
+    started(ids.b1, 215),
+    created(ids.b1x, ids.b1, "B1X nested running", 220),
+    started(ids.b1x, 225),
+    created(ids.bDone, ids.rootB, "B done", 300),
+    started(ids.bDone, 300),
+    succeeded(ids.bDone, 310),
+    created(ids.rootC, undefined, "Root C", 130),
+    created(ids.c1, ids.rootC, "C1 running", 220),
+    started(ids.c1, 225),
+    created(ids.rootD, undefined, "Root D", 140),
+    created(ids.dDone, ids.rootD, "D done", 300),
+    started(ids.dDone, 300),
+    succeeded(ids.dDone, 310),
+  ];
+  for (const event of events) noteEvent(registry, event);
+  return { registry, ids };
+}
+
+await checkAsync('mode "all" is scoped to the caller\'s active descendant subtree', async () => {
+  const { registry, ids } = scopedFixture();
+  const tool = makeTool({}, registry);
+  const result = await tool.execute({ mode: "all" }, { sessionID: ids.rootA });
+  const byID = new Map(result.output.subagents.map((subagent) => [subagent.sessionID, subagent]));
+
+  assert.equal(result.output.count, 3, "only A's running/waiting descendants are active");
+  assert.equal(result.output.subagents.length, 3, "duplicate events must not duplicate rows");
+  assert.deepEqual(
+    result.output.subagents.map((subagent) => subagent.sessionID),
+    [ids.a1x, ids.a2, ids.a1],
+    "same time.updated DESC ordering as the global inventory",
+  );
+  assert.deepEqual([...byID.keys()].sort(), [ids.a1, ids.a1x, ids.a2].sort());
+
+  assert.equal(byID.get(ids.a1).state, "running");
+  assert.equal(byID.get(ids.a2).state, "waiting");
+  assert.equal(byID.get(ids.a1x).state, "running");
+
+  for (const forbidden of [
+    ids.aDone,
+    ids.aIdle,
+    ids.rootA,
+    ids.b1,
+    ids.b1x,
+    ids.bDone,
+    ids.rootB,
+    ids.c1,
+    ids.rootC,
+    ids.rootD,
+    ids.dDone,
+  ]) {
+    assert.ok(!byID.has(forbidden), `${forbidden} must not appear in A's list`);
+  }
+
+  // Parity with the sidebar tree's authoritative descendant + active semantics.
+  const activityOf = (sessionID) => {
+    const record = registry.sessions.get(sessionID);
+    if (record && record.waiting) return "waiting";
+    if (record && record.active) return "running";
+    return "idle";
+  };
+  const expected = descendantSessions([...registry.sessions.values()], ids.rootA)
+    .filter((session) => isActiveSidebarSubagent(session, activityOf(session.id)))
+    .map((session) => session.id);
+
+  assert.deepEqual([...byID.keys()].sort(), [...expected].sort());
+  assert.equal(result.output.count, expected.length);
+  assert.match(result.content, /3 active subagent\(s\)/);
+});
+
+await checkAsync('mode "all" from a nested caller returns only its own active descendants', async () => {
+  const { registry, ids } = scopedFixture();
+  const tool = makeTool({}, registry);
+  const result = await tool.execute({ mode: "all" }, { sessionID: ids.a1 });
+
+  assert.deepEqual(
+    result.output.subagents.map((subagent) => subagent.sessionID),
+    [ids.a1x],
+  );
+  assert.equal(result.output.count, 1);
+  assert.equal(result.output.subagents[0].state, "running");
+
+  const returned = new Set(result.output.subagents.map((subagent) => subagent.sessionID));
+  for (const foreign of [ids.a1, ids.a2, ids.b1, ids.b1x, ids.rootB, ids.c1]) {
+    assert.ok(!returned.has(foreign), `${foreign} is outside the nested caller's subtree`);
+  }
+});
+
+await checkAsync('mode "all" returns empty without active descendants or a caller id', async () => {
+  const { registry, ids } = scopedFixture();
+  const tool = makeTool({}, registry);
+
+  const noDescendants = await tool.execute({ mode: "all" }, { sessionID: ids.rootD });
+  assert.deepEqual(noDescendants.output, { subagents: [], count: 0 });
+  assert.equal(noDescendants.content, "No active subagents.");
+
+  // Other roots still have active descendants, so the empty result proves there
+  // is no process-wide fallback.
+  const sibling = await tool.execute({ mode: "all" }, { sessionID: ids.rootB });
+  assert.equal(sibling.output.count, 2);
+
+  const noCaller = await tool.execute({ mode: "all" });
+  assert.deepEqual(noCaller.output, { subagents: [], count: 0 });
+  assert.equal(noCaller.content, "No active subagents.");
 });
 
 // ------------------------------------------------------ missing / bad input
@@ -138,9 +299,11 @@ await checkAsync("missing/unknown input never throws and preserves the state pat
   const bogus = await tool.execute({ mode: "bogus" }, {});
   assert.equal(bogus.output.error, "missing-sessionID", "unknown mode behaves as 'state'");
 
-  // "all" needs no sessionID.
+  // "all" needs no input sessionID, but without a caller context it must not
+  // fall back to the process-wide registry.
   const allNoSession = await tool.execute({ mode: "all" });
   assert.deepEqual(allNoSession.output, { subagents: [], count: 0 });
+  assert.equal(allNoSession.content, "No active subagents.");
 });
 
 // ------------------------------------------------------------- existing modes
