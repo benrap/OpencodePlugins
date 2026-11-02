@@ -119,6 +119,39 @@ await checkAsync('mode "all" returns exactly the active subagents, with names an
     "the succeeded (terminal) child is excluded",
   );
   assert.match(result.content, /2 active subagent\(s\)/);
+  assert.match(result.content, /\[c1\]/, "content must render c1's sessionID");
+  assert.match(result.content, /\[c2\]/, "content must render c2's sessionID");
+});
+
+await checkAsync('mode "all" content renders name (state) [sessionID] and keeps the structured shape', async () => {
+  const tool = makeTool({}, activeFixture());
+  const result = await tool.execute({ mode: "all" }, { sessionID: "root" });
+
+  // Structured payload still carries exactly { name, state, sessionID }.
+  assert.deepEqual(
+    [...result.output.subagents].sort((a, b) => (a.sessionID < b.sessionID ? -1 : 1)),
+    [
+      { name: "Running child", state: "running", sessionID: "c1" },
+      { name: "Waiting child", state: "waiting", sessionID: "c2" },
+    ],
+  );
+
+  // Rendered content is the human/model-visible surface: it must name the
+  // sessionID so the caller can re-target a subagent without a second lookup.
+  assert.equal(
+    result.content,
+    "2 active subagent(s): Waiting child (waiting) [c2], Running child (running) [c1]",
+  );
+  for (const subagent of result.output.subagents) {
+    assert.ok(
+      result.content.includes(`[${subagent.sessionID}]`),
+      `content must contain [${subagent.sessionID}] for ${subagent.name}`,
+    );
+  }
+  assert.ok(
+    !result.content.includes("[undefined]"),
+    "content must never render a [undefined] bracket",
+  );
 });
 
 await checkAsync('mode "all" on an empty registry returns the empty shape', async () => {

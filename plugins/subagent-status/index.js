@@ -75,9 +75,9 @@ const TOOL_DESCRIPTION =
   'blockers, and the likely next step. Pass the subagent\'s sessionID (the id ' +
   'returned when it was spawned). Set mode to "state" for a lightweight ' +
   'status check (running/idle/waiting/finished) without an LLM call. Set mode ' +
-  'to "all" to list the name and state of every active (running/waiting) ' +
-  'subagent in the caller\'s descendant tree; "all" needs no sessionID and ' +
-  'makes no LLM call.';
+  'to "all" to list the name, state, and sessionID of every active ' +
+  '(running/waiting) subagent in the caller\'s descendant tree; "all" needs no ' +
+  'sessionID and makes no LLM call.';
 
 const INPUT_SCHEMA = {
   type: 'object',
@@ -105,9 +105,9 @@ const INPUT_SCHEMA = {
       description:
         '"state" (default) returns only the session state ' +
         '(running/idle/waiting/finished) without an LLM call. "summary" also ' +
-        'generates an LLM summary. "all" returns the name and state of every ' +
-        'active (running/waiting) subagent in the caller\'s descendant tree and ' +
-        'needs no sessionID.',
+        'generates an LLM summary. "all" returns the name, state, and sessionID ' +
+        'of every active (running/waiting) subagent in the caller\'s descendant ' +
+        'tree and needs no sessionID.',
     },
   },
   additionalProperties: false,
@@ -535,7 +535,11 @@ function makeTool(ctx, registry = globalRegistry()) {
             output: { subagents, count: subagents.length },
             content: subagents.length
               ? `${subagents.length} active subagent(s): ${subagents
-                  .map((subagent) => `${subagent.name} (${subagent.state})`)
+                  .map(
+                    (subagent) =>
+                      `${subagent.name} (${subagent.state})` +
+                      (subagent.sessionID ? ` [${subagent.sessionID}]` : ''),
+                  )
                   .join(', ')}`
               : 'No active subagents.',
           };

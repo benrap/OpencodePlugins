@@ -15,12 +15,15 @@ It supports three modes:
 - **`summary`** — Returns the state AND an LLM-generated 2-4 sentence summary
   of what the subagent is doing, its status, key findings, blockers, and the
   likely next step.
-- **`all`** — Returns the NAME and STATE of every ACTIVE subagent (state is
-  exactly `running` or `waiting`) in the CALLING session's descendant subtree.
-  It needs **no `sessionID`** and makes **no LLM call**. The inventory comes
-  from the host event stream, scoped to that subtree; sibling root sessions are
-  excluded, as are the caller itself, root/primary sessions (which have no
-  parent), and finished/idle sessions.
+- **`all`** — Returns the NAME, STATE, and SESSIONID of every ACTIVE subagent
+  (state is exactly `running` or `waiting`) in the CALLING session's descendant
+  subtree. It needs **no `sessionID`** and makes **no LLM call**. The inventory
+  comes from the host event stream, scoped to that subtree; sibling root
+  sessions are excluded, as are the caller itself, root/primary sessions (which
+  have no parent), and finished/idle sessions. Each entry is
+  `{ name, state, sessionID }`, and the content string renders each one as
+  `name (state) [sessionID]` so the caller can re-target a subagent with that
+  `sessionID`.
 
 ## Usage
 
