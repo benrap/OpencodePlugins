@@ -166,12 +166,27 @@ check("abortTargets(all): terminal descendants are skipped by default activity",
   assert.ok(ids.includes("a") && ids.includes("a1") && ids.includes("b"))
 })
 
+check("abortTargets(all): selects waiting descendants as live sessions", () => {
+  const activity = (session) =>
+    session.id === "a" ? "running" : session.id === "b" ? "waiting" : "idle"
+  const ids = abortTargets("caller", tree, { all: true, activityOf: activity }).map((x) => x.id)
+  assert.deepEqual(ids, ["a", "b"])
+})
+
 check("abortTargets(explicit): filters to the named running descendant", () => {
   const ids = abortTargets("caller", tree, {
     sessionID: "a1",
     activityOf: activityFrom(running),
   }).map((x) => x.id)
   assert.deepEqual(ids, ["a1"])
+})
+
+check("abortTargets(explicit): selects a named waiting descendant", () => {
+  const ids = abortTargets("caller", tree, {
+    sessionID: "b",
+    activityOf: (session) => (session.id === "b" ? "waiting" : "idle"),
+  }).map((x) => x.id)
+  assert.deepEqual(ids, ["b"])
 })
 
 check("abortTargets(explicit): skips a non-running/terminal explicit id", () => {
@@ -204,9 +219,24 @@ check("noteEvent: session.created/execution events track lineage and activity", 
   assert.equal(registry.sessions.get("c").parentID, "p")
   assert.equal(registry.sessions.get("c").agent, "explore")
   assert.equal(registry.active.has("c"), true)
+  assert.equal(registry.waiting.has("c"), false)
+
+  noteEvent(registry, {
+    type: "session.status",
+    data: { sessionID: "c", status: { type: "waiting" } },
+  })
+  assert.equal(registry.active.has("c"), true)
+  assert.equal(registry.waiting.has("c"), true)
+
+  noteEvent(registry, {
+    type: "session.status",
+    data: { sessionID: "c", status: { type: "busy" } },
+  })
+  assert.equal(registry.waiting.has("c"), false)
 
   noteEvent(registry, { type: "session.execution.succeeded", data: { sessionID: "c" } })
   assert.equal(registry.active.has("c"), false)
+  assert.equal(registry.waiting.has("c"), false)
   assert.equal(registry.sessions.get("c").outcome, "succeeded")
 
   noteEvent(registry, { type: "session.deleted", data: { sessionID: "c" } })
@@ -309,8 +339,33 @@ await checkAsync("executeAbort(all:true) aborts exactly the running descendants"
   assert.deepEqual(result.failures, [])
   assert.equal(calls.length, 2)
   assert.ok(calls.every((arg) => arg.resume === false))
+  assert.ok(calls.every((arg) => arg.cancelBackground === true))
   assert.ok(!result.aborted.includes("caller"))
   assert.ok(!result.aborted.includes("root"))
+})
+
+await checkAsync("executeAbort(all:true) aborts a waiting descendant via cancelBackground", async () => {
+  const calls = []
+  const { registry, ctx } = fixture({
+    interrupt: async (arg) => {
+      calls.push(arg)
+      // The real runtime returns interrupted:false for a waiting session unless
+      // the interrupt opts into cancelling its durable background work.
+      return { interrupted: arg.sessionID !== "b" || arg.cancelBackground === true }
+    },
+  })
+  noteEvent(registry, { type: "session.execution.started", data: { sessionID: "b" } })
+  noteEvent(registry, {
+    type: "session.status",
+    data: { sessionID: "b", status: { type: "waiting" } },
+  })
+  const result = JSON.parse(
+    (await executeAbort(ctx, registry, { all: true }, { sessionID: "caller" })).content,
+  )
+  assert.ok(result.aborted.includes("b"))
+  assert.deepEqual(result.failures, [])
+  const bCall = calls.find((arg) => arg.sessionID === "b")
+  assert.equal(bCall.cancelBackground, true)
 })
 
 await checkAsync("executeAbort(sessionID) aborts a single named descendant", async () => {
@@ -319,6 +374,27 @@ await checkAsync("executeAbort(sessionID) aborts a single named descendant", asy
     (await executeAbort(ctx, registry, { sessionID: "a" }, { sessionID: "caller" })).content,
   )
   assert.deepEqual(result.aborted, ["a"])
+})
+
+await checkAsync("executeAbort(sessionID) aborts a waiting descendant via cancelBackground", async () => {
+  const calls = []
+  const { registry, ctx } = fixture({
+    interrupt: async (arg) => {
+      calls.push(arg)
+      return { interrupted: arg.cancelBackground === true }
+    },
+  })
+  noteEvent(registry, { type: "session.execution.started", data: { sessionID: "b" } })
+  noteEvent(registry, {
+    type: "session.status",
+    data: { sessionID: "b", status: { type: "waiting" } },
+  })
+  const result = JSON.parse(
+    (await executeAbort(ctx, registry, { sessionID: "b" }, { sessionID: "caller" })).content,
+  )
+  assert.deepEqual(result.aborted, ["b"])
+  assert.deepEqual(result.failures, [])
+  assert.equal(calls[0].cancelBackground, true)
 })
 
 await checkAsync("executeAbort: the root session is never aborted", async () => {

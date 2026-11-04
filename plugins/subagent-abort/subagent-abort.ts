@@ -66,12 +66,20 @@ export type SessionRecord = SubagentSession & { agent?: string }
 export type AbortRegistry = {
   sessions: Map<string, SessionRecord>
   active: Set<string>
+  /** Sessions parked in `waiting`: no foreground turn, but live background work. */
+  waiting: Set<string>
   controller: AbortController | null
   subscribed: boolean
 }
 
 export function createRegistry(): AbortRegistry {
-  return { sessions: new Map(), active: new Set(), controller: null, subscribed: false }
+  return {
+    sessions: new Map(),
+    active: new Set(),
+    waiting: new Set(),
+    controller: null,
+    subscribed: false,
+  }
 }
 
 export function listSessions(registry: AbortRegistry): SessionRecord[] {
@@ -79,7 +87,7 @@ export function listSessions(registry: AbortRegistry): SessionRecord[] {
 }
 
 export function isActive(registry: AbortRegistry, sessionID: string): boolean {
-  return registry.active.has(sessionID)
+  return registry.active.has(sessionID) || registry.waiting.has(sessionID)
 }
 
 // ---------------------------------------------------------------------------
@@ -117,8 +125,9 @@ export const ABORT_TOOL_DESCRIPTION =
   "Abort the active execution of subagent sessions you spawned. Only " +
   "descendants of the calling session can be aborted; the root/primary session " +
   "is never aborted. Pass sessionID to abort a specific descendant, or all:true " +
-  "to abort every running descendant. Returns the aborted session ids so you " +
-  "can continue them later through the `subagent` tool with that sessionID."
+  "to abort every live (running or waiting) descendant. Returns the aborted " +
+  "session ids so you can continue them later through the `subagent` tool " +
+  "with that sessionID."
 
 const ABORT_INPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -129,7 +138,7 @@ const ABORT_INPUT_SCHEMA: Record<string, unknown> = {
     },
     all: {
       type: "boolean",
-      description: "Abort every running descendant of the calling session.",
+      description: "Abort every live (running or waiting) descendant of the calling session.",
     },
   },
   additionalProperties: false,
@@ -186,11 +195,13 @@ export function noteEvent(registry: AbortRegistry, event: unknown): void {
   if (type === "session.deleted" || type === "session.removed") {
     registry.sessions.delete(sessionID)
     registry.active.delete(sessionID)
+    registry.waiting.delete(sessionID)
     return
   }
 
   if (type === "session.execution.started") {
     registry.active.add(sessionID)
+    registry.waiting.delete(sessionID)
     // A restarted/continued session is live again: clear any outcome left by
     // its previous terminal event, otherwise it stays "terminal" forever and
     // can never be aborted on a later run.
@@ -204,6 +215,7 @@ export function noteEvent(registry: AbortRegistry, event: unknown): void {
 
   if (TERMINAL_EVENTS.has(type)) {
     registry.active.delete(sessionID)
+    registry.waiting.delete(sessionID)
     const session = registry.sessions.get(sessionID)
     if (session) {
       session.outcome =
@@ -222,8 +234,18 @@ export function noteEvent(registry: AbortRegistry, event: unknown): void {
       data.status && typeof data.status === "object" ? data.status : {}
     ) as Record<string, unknown>
     const kind = typeof status.type === "string" ? status.type : ""
-    if (kind === "busy" || kind === "retry") registry.active.add(sessionID)
-    else if (kind === "idle" || kind === "error") registry.active.delete(sessionID)
+    if (kind === "busy" || kind === "retry") {
+      registry.active.add(sessionID)
+      registry.waiting.delete(sessionID)
+    } else if (kind === "waiting") {
+      // A parked session is still live: its turn settled but durable background
+      // work is outstanding, so an abort must still reach it.
+      registry.active.add(sessionID)
+      registry.waiting.add(sessionID)
+    } else if (kind === "idle" || kind === "error") {
+      registry.active.delete(sessionID)
+      registry.waiting.delete(sessionID)
+    }
     return
   }
 
@@ -414,10 +436,13 @@ async function interrupt(
     throw new Error("session.interrupt is unavailable on this runtime")
   }
   // v2.0.6 reads `resume`; older/newer builds may read `continue` or nothing.
+  // `cancelBackground` is required by the patched v2.1.4 runtime to stop a
+  // `waiting` session: a default interrupt is foreground-only and returns
+  // `interrupted:false` for a parked session with durable background work.
   const attempts: Record<string, unknown>[] = [
-    { sessionID, resume: false },
-    { sessionID, continue: false },
-    { sessionID },
+    { sessionID, resume: false, cancelBackground: true },
+    { sessionID, continue: false, cancelBackground: true },
+    { sessionID, cancelBackground: true },
   ]
   let last: unknown
   for (const arg of attempts) {
@@ -536,7 +561,11 @@ export async function executeAbort(
   const sessions = [...byID.values()]
   const activityOf = all
     ? (session: SubagentSession) =>
-        registry.active.has(session.id) ? ("running" as const) : ("idle" as const)
+        registry.waiting.has(session.id)
+          ? ("waiting" as const)
+          : registry.active.has(session.id)
+            ? ("running" as const)
+            : ("idle" as const)
     : undefined
 
   const targets = abortTargets(caller, sessions, { all, sessionID: explicit, activityOf })

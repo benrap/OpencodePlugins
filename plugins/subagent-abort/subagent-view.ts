@@ -118,7 +118,7 @@ export function isDescendantOf(
 }
 
 export type AbortTargetsOptions = {
-  /** Select every running descendant of the focused session. */
+  /** Select every live (running or waiting) descendant of the focused session. */
   all?: boolean
   /** When set, restrict the result to these explicit descendant ids. */
   sessionID?: string | readonly string[]
@@ -131,9 +131,10 @@ function defaultActivity(session: SubagentSession): "idle" | "running" | "waitin
 }
 
 /**
- * Running descendants of `focusedSessionID`, never the focused session itself
- * and never a root. With `opts.all` every running descendant is returned;
- * otherwise only the running descendants named by `opts.sessionID` are.
+ * Live (running or waiting) descendants of `focusedSessionID`, never the
+ * focused session itself and never a root. With `opts.all` every live
+ * descendant is returned; otherwise only the live descendants named by
+ * `opts.sessionID` are.
  */
 export function abortTargets(
   focusedSessionID: string,
@@ -143,18 +144,20 @@ export function abortTargets(
   if (!focusedSessionID) return []
   const activityOf = opts.activityOf ?? defaultActivity
   const byID = sessionsIndex(sessions)
-  const running = descendantSessions(sessions, focusedSessionID).filter((session) => {
+  const live = descendantSessions(sessions, focusedSessionID).filter((session) => {
     if (isRootSession(session)) return false
     if (session.id === focusedSessionID) return false
     if (!isDescendantOf(session.id, focusedSessionID, byID)) return false
-    return activityOf(session) === "running"
+    // `waiting` is a live session too (a settled turn with outstanding
+    // background work), so only idle and terminal sessions are excluded.
+    return session.outcome == null && isActiveSubagent(session, activityOf(session))
   })
 
-  if (opts.all) return running
+  if (opts.all) return live
 
   const wanted = idSet(opts.sessionID)
   if (wanted.size === 0) return []
-  return running.filter((session) => wanted.has(session.id))
+  return live.filter((session) => wanted.has(session.id))
 }
 
 export type AbortVerdict = { ok: true } | { ok: false; reason: string }

@@ -15,7 +15,8 @@ calling session spawned.
 ## Features
 
 - Aborts ONE named descendant: `abort_subagent({ sessionID })`.
-- Aborts EVERY running descendant of the caller: `abort_subagent({ all: true })`.
+- Aborts EVERY live (running or waiting) descendant of the caller:
+  `abort_subagent({ all: true })`.
 - Returns the aborted `sessionID`s so the caller can continue them later through
   the `subagent` tool with that sessionID.
 - Process-wide session registry fed by the host event stream, so activity and
@@ -37,15 +38,19 @@ the folder — no `@opentui/*`, no `solid-js`, no `@opencode/plugin`.
    `Symbol.for("opencode.subagent-abort.registry.v1")`, survives the host
    re-evaluating the module. `installAbortTool` subscribes once to
    `ctx.event.subscribe` and folds `session.created` / `session.execution.*` /
-   `session.status` / `session.updated` events into a `Map<sessionID, record>`
-   plus an active-session `Set`. Malformed events are ignored, never thrown.
+   `session.status` / `session.updated` events into a `Map<sessionID, record>`,
+   an active-session `Set`, and a `waiting`-session `Set`. A waiting session is
+   parked (no foreground turn) but still live because durable background work is
+   outstanding. Malformed events are ignored, never thrown.
 
 3. **Execution.** On each call the tool resolves the caller session and the
    target lineage (live via `ctx.session.get`, falling back to the registry),
-   selects running descendants, re-checks the guards, honours a permission gate
-   if a future runtime exposes one, then calls
-   `ctx.session.interrupt({ sessionID, resume: false })` (with defensive
-   fallbacks). Per-target failures are reported in the result rather than
+   selects live (running or waiting) descendants, re-checks the guards, honours
+   a permission gate if a future runtime exposes one, then calls
+   `ctx.session.interrupt({ sessionID, resume: false, cancelBackground: true })`
+   (with defensive fallbacks). `cancelBackground` is required by the patched
+   v2.1.4 runtime: a default interrupt is foreground-only and is a no-op for a
+   waiting session. Per-target failures are reported in the result rather than
    thrown.
 
 ## Usage
@@ -56,7 +61,7 @@ abort_subagent({ sessionID: "ses_abc123" })
 ```
 
 ```jsonc
-// abort every running descendant of the calling session
+// abort every live (running or waiting) descendant of the calling session
 abort_subagent({ all: true })
 ```
 
@@ -72,8 +77,8 @@ Each failure is `{ "sessionID": "...", "reason": "...", "message"?: "..." }`.
 
 | Name        | Type    | Description                                            |
 | ----------- | ------- | ------------------------------------------------------ |
-| `sessionID` | string  | Session id of a descendant subagent to abort.          |
-| `all`       | boolean | Abort every running descendant of the calling session. |
+| `sessionID` | string  | Session id of a descendant subagent to abort.                        |
+| `all`       | boolean | Abort every live (running or waiting) descendant of the calling session. |
 
 `additionalProperties` is `false`; pass `sessionID`, `all`, or both.
 
@@ -104,4 +109,4 @@ module directly). Run from this plugin folder:
 node --experimental-strip-types test/subagent-abort.test.mjs
 ```
 
-The suite prints `41 checks passed`.
+The suite prints `45 checks passed`.
