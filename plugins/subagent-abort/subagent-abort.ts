@@ -72,22 +72,40 @@ export type AbortRegistry = {
   subscribed: boolean
 }
 
+/**
+ * Coerce any registry-shaped value into the current shape, in place.
+ *
+ * The registry is stored on `globalThis` on purpose so it survives the host
+ * re-evaluating this module (the host logs `loading plugin` many times in one
+ * run). That also means a registry built by an OLDER version of this module —
+ * before `waiting` was added — can still be installed under the key, and
+ * reads such as `registry.waiting.has(...)` would throw. Restoring missing
+ * collections here, in place, keeps the live event subscription pointed at
+ * the same object while guaranteeing every field. `createRegistry()` delegates
+ * here, so a new registry literal can only be born in one place and every
+ * restore/global path funnels through the same guard.
+ */
+export function ensureRegistryShape(value: unknown): AbortRegistry {
+  const registry = (value && typeof value === "object" ? value : {}) as AbortRegistry
+  if (!(registry.sessions instanceof Map)) registry.sessions = new Map()
+  if (!(registry.active instanceof Set)) registry.active = new Set()
+  if (!(registry.waiting instanceof Set)) registry.waiting = new Set()
+  if (registry.controller === undefined) registry.controller = null
+  if (typeof registry.subscribed !== "boolean") registry.subscribed = false
+  return registry
+}
+
 export function createRegistry(): AbortRegistry {
-  return {
-    sessions: new Map(),
-    active: new Set(),
-    waiting: new Set(),
-    controller: null,
-    subscribed: false,
-  }
+  return ensureRegistryShape({})
 }
 
 export function listSessions(registry: AbortRegistry): SessionRecord[] {
-  return [...registry.sessions.values()]
+  return [...ensureRegistryShape(registry).sessions.values()]
 }
 
 export function isActive(registry: AbortRegistry, sessionID: string): boolean {
-  return registry.active.has(sessionID) || registry.waiting.has(sessionID)
+  const current = ensureRegistryShape(registry)
+  return current.active.has(sessionID) || current.waiting.has(sessionID)
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +188,7 @@ function timeUpdated(data: Record<string, unknown>): number {
  */
 export function noteEvent(registry: AbortRegistry, event: unknown): void {
   if (!event || typeof event !== "object") return
+  registry = ensureRegistryShape(registry)
   const envelope = event as { type?: unknown; data?: unknown }
   const type = typeof envelope.type === "string" ? envelope.type : ""
   if (!type) return
@@ -264,11 +283,12 @@ const REGISTRY_KEY = Symbol.for("opencode.subagent-abort.registry.v1")
 /** Process-wide registry; survives the host re-evaluating the plugin module. */
 export function globalRegistry(): AbortRegistry {
   const store = globalThis as unknown as Record<symbol, AbortRegistry | undefined>
-  let registry = store[REGISTRY_KEY]
-  if (!registry) {
-    registry = createRegistry()
-    store[REGISTRY_KEY] = registry
-  }
+  // Adopt a registry left by a previous module instance (or an older build) in
+  // place: the live event subscription captured that object, so replacing it
+  // would silently detach the new tool from the event stream. The guard also
+  // upgrades a pre-`waiting` registry so every read sees a complete shape.
+  const registry = ensureRegistryShape(store[REGISTRY_KEY])
+  store[REGISTRY_KEY] = registry
   return registry
 }
 
@@ -535,6 +555,7 @@ export async function executeAbort(
   input: unknown,
   toolContext: unknown,
 ): Promise<{ content: string }> {
+  registry = ensureRegistryShape(registry)
   const caller = callerSessionID(toolContext)
   const params = (input && typeof input === "object" ? input : {}) as {
     sessionID?: unknown

@@ -41,7 +41,11 @@ the folder — no `@opentui/*`, no `solid-js`, no `@opencode/plugin`.
    `session.status` / `session.updated` events into a `Map<sessionID, record>`,
    an active-session `Set`, and a `waiting`-session `Set`. A waiting session is
    parked (no foreground turn) but still live because durable background work is
-   outstanding. Malformed events are ignored, never thrown.
+   outstanding. Malformed events are ignored, never thrown. Because the
+   registry survives module re-evaluation, it may have been created by an older
+   build; `globalRegistry()`/`createRegistry()` funnel through
+   `ensureRegistryShape()`, which upgrades a legacy registry (for example one
+   without `waiting`) in place before any read.
 
 3. **Execution.** On each call the tool resolves the caller session and the
    target lineage (live via `ctx.session.get`, falling back to the registry),
@@ -109,4 +113,6 @@ module directly). Run from this plugin folder:
 node --experimental-strip-types test/subagent-abort.test.mjs
 ```
 
-The suite prints `45 checks passed`.
+The suite prints `47 checks passed`, including a regression check that adopts a
+legacy registry without `waiting` through `globalRegistry()` and runs the abort
+path against it.

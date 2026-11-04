@@ -12,7 +12,9 @@ const {
   createRegistry,
   noteEvent,
   executeAbort,
+  globalRegistry,
   installAbortTool,
+  isActive,
   makeAbortTool,
 } = await import(ABORT)
 
@@ -537,6 +539,90 @@ check("descendantSessions: a cyclic/self-parent lineage terminates without throw
   assert.ok(ids.includes("a"), "a must be reached")
   assert.ok(ids.includes("b"), "b must be reached")
   assert.equal(new Set(ids).size, ids.length, "no duplicates")
+})
+
+// ------------------------------------------------- global registry migration
+// The registry lives on globalThis so it survives the host re-evaluating the
+// plugin module (the log shows `loading plugin` repeatedly in one run). A
+// registry created by the previous build — before `waiting` existed — is
+// therefore still installed after an upgrade. The new module used to read
+// `registry.waiting.has(...)` on that old shape and throw
+// "undefined is not an object (evaluating 'registry.waiting.has')".
+await checkAsync("globalRegistry: adopts a legacy (pre-waiting) registry after a module reload", async () => {
+  const key = Symbol.for("opencode.subagent-abort.registry.v1")
+  const store = globalThis
+  const previous = store[key]
+  const legacy = {
+    sessions: new Map([
+      ["root", s("root", undefined, undefined, 100)],
+      ["caller", s("caller", "root", undefined, 90)],
+      ["a", s("a", "caller", undefined, 80)],
+    ]),
+    active: new Set(["a"]),
+    // no `waiting`: this is the exact v1 shape the old module left behind
+    controller: null,
+    subscribed: true,
+  }
+  store[key] = legacy
+  try {
+    const registry = globalRegistry()
+    assert.equal(
+      registry,
+      legacy,
+      "the legacy object must be migrated in place so the live event subscription keeps feeding it",
+    )
+    assert.doesNotThrow(() => isActive(registry, "a"))
+    assert.equal(isActive(registry, "a"), true)
+
+    const calls = []
+    const ctx = {
+      session: {
+        get: async ({ sessionID }) => registry.sessions.get(sessionID),
+        interrupt: async (arg) => {
+          calls.push(arg)
+          return { interrupted: true }
+        },
+      },
+    }
+    const result = JSON.parse(
+      (await executeAbort(ctx, registry, { all: true }, { sessionID: "caller" })).content,
+    )
+    assert.deepEqual(result.aborted, ["a"])
+    assert.deepEqual(result.failures, [])
+    assert.equal(calls[0].cancelBackground, true)
+    assert.ok(registry.waiting instanceof Set, "globalRegistry must guarantee a waiting set")
+  } finally {
+    if (previous === undefined) delete store[key]
+    else store[key] = previous
+  }
+})
+
+await checkAsync("isActive/executeAbort: a raw legacy registry is normalized at the boundary", async () => {
+  const legacy = {
+    sessions: new Map([
+      ["root", s("root", undefined, undefined, 100)],
+      ["caller", s("caller", "root", undefined, 90)],
+      ["a", s("a", "caller", undefined, 80)],
+    ]),
+    active: new Set(["a"]),
+    // no `waiting`
+    controller: null,
+    subscribed: false,
+  }
+  assert.doesNotThrow(() => isActive(legacy, "a"))
+  assert.equal(isActive(legacy, "a"), true)
+
+  const ctx = {
+    session: {
+      get: async ({ sessionID }) => legacy.sessions.get(sessionID),
+      interrupt: async () => ({ interrupted: true }),
+    },
+  }
+  const result = JSON.parse(
+    (await executeAbort(ctx, legacy, { all: true }, { sessionID: "caller" })).content,
+  )
+  assert.deepEqual(result.aborted, ["a"])
+  assert.deepEqual(result.failures, [])
 })
 
 console.log(results.join("\n"))
